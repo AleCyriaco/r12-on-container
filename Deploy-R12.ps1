@@ -425,6 +425,22 @@ if (Should-Run 'Preflight') {
         Write-Warn2 'se o init falhar com HCS_E_HYPERV_NOT_INSTALLED: PowerShell elevado ->'
         Write-Warn2 '  wsl.exe --install --no-distribution  e REINICIE; persistindo, e BIOS/virtualizacao aninhada.'
     }
+    # O caso classico do "instalei mas nao reiniciei": o componente ja le
+    # Enabled, mas o hypervisor so e ativado no proximo boot. Sem esta barreira
+    # o deploy segue e morre no init com HCS_E_HYPERV_NOT_INSTALLED de novo.
+    # The classic "installed but did not reboot": the feature already reads
+    # Enabled, but the hypervisor only launches on the next boot.
+    if ($vmp -and $vmp.State -eq 'Enabled' -and -not $cs.HypervisorPresent) {
+        Write-Host ''
+        Write-Host 'O Virtual Machine Platform esta habilitado, mas o hypervisor NAO esta rodando.' -ForegroundColor Yellow
+        Write-Host 'Quase sempre isso significa uma coisa: falta REINICIAR o Windows.' -ForegroundColor Yellow
+        Write-Host 'Se ja reiniciou e continua aqui: maquina fisica -> VT-x/AMD-V na BIOS;' -ForegroundColor Yellow
+        Write-Host 'maquina virtual -> virtualizacao aninhada no hypervisor dela.' -ForegroundColor Yellow
+        Write-Host '---' -ForegroundColor Yellow
+        Write-Host 'Virtual Machine Platform is enabled but the hypervisor is NOT running.' -ForegroundColor Yellow
+        Write-Host 'Almost always this means one thing: REBOOT Windows.' -ForegroundColor Yellow
+        Die 'hypervisor inativo -- reinicie o Windows e rode o mesmo comando de novo'
+    }
 
     $wslOk = $false
     try { & wsl --status 2>&1 | Out-Null; $wslOk = ($LASTEXITCODE -eq 0) } catch { $wslOk = $false }
