@@ -379,8 +379,37 @@ if (Should-Run 'Preflight') {
         Write-Warn2 'vai subir, mas espere swap e lentidao -- 48 GB e o recomendado.'
     }
 
-    if (-not $cs.HypervisorPresent) {
-        Write-Warn2 'hypervisor nao detectado. Habilite a virtualizacao na BIOS/UEFI.'
+    # Virtualizacao de verdade, em camadas. "wsl --status" sai com 0 mesmo sem
+    # o Virtual Machine Platform, e HypervisorPresent=true nao garante nada
+    # quando o proprio Windows roda dentro de uma VM sem virtualizacao
+    # aninhada. Encontrado em campo: preflight limpo e o init morrendo depois
+    # com HCS_E_HYPERV_NOT_INSTALLED.
+    # Real virtualisation checks, layered. "wsl --status" exits 0 even without
+    # the Virtual Machine Platform, and HypervisorPresent=true proves nothing
+    # when Windows itself runs inside a VM without nested virtualisation.
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+    if (-not $cs.HypervisorPresent -and $cpu.VirtualizationFirmwareEnabled -eq $false) {
+        Die ('a virtualizacao esta DESLIGADA no firmware (VT-x / AMD-V). Isso nao liga por ' +
+             'software: habilite na BIOS/UEFI e rode de novo. Se esta maquina for ela mesma ' +
+             'uma VM, habilite a virtualizacao aninhada no hypervisor dela.')
+    }
+    $vmp = $null
+    try { $vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Stop } catch { }
+    if ($vmp -and $vmp.State -ne 'Enabled') {
+        if (Test-Admin) {
+            Write-Info 'habilitando o Virtual Machine Platform'
+            & wsl.exe --install --no-distribution
+            Write-Warn2 'REINICIE o Windows e rode o mesmo comando de novo.'
+            Die 'reinicio necessario para concluir a habilitacao da virtualizacao'
+        }
+        Die ('o componente "Virtual Machine Platform" esta desabilitado e habilita-lo exige ' +
+             'Administrador. Num PowerShell elevado: wsl.exe --install --no-distribution ' +
+             'e depois REINICIE o Windows.')
+    }
+    if (-not $vmp -and -not (Test-Admin)) {
+        Write-Warn2 'sem Administrador nao da para conferir o Virtual Machine Platform.'
+        Write-Warn2 'se o init falhar com HCS_E_HYPERV_NOT_INSTALLED: PowerShell elevado ->'
+        Write-Warn2 '  wsl.exe --install --no-distribution  e REINICIE; persistindo, e BIOS/virtualizacao aninhada.'
     }
 
     $wslOk = $false
@@ -482,7 +511,13 @@ if (Should-Run 'Machine') {
     } else {
         Write-Info "criando a maquina ($Cpus CPUs, $MemoryMB MB, $DiskGB GB)"
         & podman machine init $MachineName --cpus $Cpus --memory $MemoryMB --disk-size $DiskGB
-        if ($LASTEXITCODE -ne 0) { Die 'falha no podman machine init' }
+        if ($LASTEXITCODE -ne 0) {
+            # nao deixar registro pela metade: um init que falhou no meio (ex.
+            # no import do WSL) as vezes registra a maquina sem VM por tras, e
+            # a proxima execucao acharia que "ja existe"
+            & podman machine rm -f $MachineName 2>&1 | Out-Null
+            Die 'falha no podman machine init'
+        }
 
         # Mover o disco para o -TargetDir. O vhdx guarda ext4 de verdade: tudo
         # fica no drive escolhido SEM passar por 9p/drvfs, que mata desempenho e
