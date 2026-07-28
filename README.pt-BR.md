@@ -144,13 +144,27 @@ dual filesystem, que aceita patches.
 ## Depois de reiniciar o Windows
 
 O container tem `--restart unless-stopped` e volta sozinho, mas roda
-`sleep infinity` — os serviços do EBS não.
+`sleep infinity` — os serviços do EBS não. Qualquer um destes o traz de volta:
 
 ```powershell
 podman machine start ebs
 cd C:\r12-on-container
 .\Deploy-R12.ps1 -From Services
 ```
+
+Ou direto de dentro da máquina, com o `scripts/bringup.sh`:
+
+```powershell
+podman machine start ebs
+podman machine ssh ebs 'WLS_PASSWORD=xxx bash /mnt/c/r12-on-container/scripts/bringup.sh'
+```
+
+Os dois fazem o mesmo, nesta ordem: reaplicam o nome canônico no `/etc/hosts`
+do container (o Podman o apaga a cada start), reiniciam o listener do banco,
+abrem o banco, **esperam o serviço realmente aceitar conexão**, e só então
+sobem a pilha de aplicação e conferem o concurrent manager. Pular qualquer um
+desses passos vira um enganoso *"APPS credentials are wrong"* — veja
+[docs/TROUBLESHOOTING.pt-BR.md](docs/TROUBLESHOOTING.pt-BR.md#tudo-quebra-depois-de-reiniciar-o-container).
 
 ## Hostname
 

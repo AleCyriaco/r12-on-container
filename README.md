@@ -141,13 +141,28 @@ install.
 ## After a Windows reboot
 
 The container has `--restart unless-stopped` and comes back on its own, but it
-runs `sleep infinity` — the EBS services do not.
+runs `sleep infinity` — the EBS services do not. Either of these brings it back:
 
 ```powershell
 podman machine start ebs
 cd C:\r12-on-container
 .\Deploy-R12.ps1 -From Services
 ```
+
+Or, straight from inside the machine, with `scripts/bringup.sh`:
+
+```powershell
+podman machine start ebs
+podman machine ssh ebs 'WLS_PASSWORD=xxx bash /mnt/c/r12-on-container/scripts/bringup.sh'
+```
+
+Both do the same thing, in this order: re-apply the canonical name to the
+container's `/etc/hosts` (Podman wipes it on every start), restart the database
+listener, open the database, **wait for the service to actually accept
+connections**, then start the application tier and check the concurrent
+manager. Skipping any of those turns into a misleading *"APPS credentials are
+wrong"* — see
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#everything-breaks-after-restarting-the-container).
 
 ## Hostname
 
