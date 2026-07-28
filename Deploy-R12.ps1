@@ -116,6 +116,24 @@ if (-not $AppsPassword) { $AppsPassword = 'apps' }   # usuario do schema, nao a 
 
 # ---------------------------------------------------------------- infraestrutura
 
+# Validar o drive do -TargetDir ANTES de qualquer uso do caminho. Sem isso a
+# falha aparece longe da causa: Join-Path morre com "Cannot find drive" se o
+# drive nao existe, e New-Item com "The path is not of a legal form" se o
+# drive existe mas nao esta utilizavel (CD-ROM, leitor de cartao vazio).
+# Validate the -TargetDir drive BEFORE any use of the path. Otherwise the
+# failure surfaces far from the cause: Join-Path dies if the drive is absent,
+# New-Item if it exists but is unusable (CD-ROM, empty card reader).
+$driveRoot = [IO.Path]::GetPathRoot($TargetDir)
+if (-not $driveRoot -or -not (Test-Path -LiteralPath $driveRoot)) {
+    $sugestao = 'C:\' + (Split-Path $TargetDir -Leaf)
+    Write-Host ''
+    Write-Host "ERRO: o drive de '$TargetDir' nao existe ou nao esta acessivel nesta maquina." -ForegroundColor Red
+    Write-Host "      Passe -TargetDir apontando para um drive real, ex.: -TargetDir '$sugestao'" -ForegroundColor Red
+    Write-Host "ERROR: the drive for '$TargetDir' does not exist or is not usable on this machine." -ForegroundColor Red
+    Write-Host "       Pass -TargetDir pointing at a real drive, e.g. -TargetDir '$sugestao'" -ForegroundColor Red
+    exit 1
+}
+
 $script:PhaseOrder = @('Preflight','Podman','Machine','Download','Extract','Container','Services','Verify')
 $script:ScriptsDir = Join-Path $TargetDir 'scripts'
 $script:LogsDir    = Join-Path $TargetDir 'logs'
