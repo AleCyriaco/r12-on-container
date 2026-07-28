@@ -61,6 +61,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
+# git, winget e afins escrevem progresso em STDERR. No PowerShell 5.1, com
+# ErrorActionPreference=Stop, cada linha de stderr de um executavel nativo
+# vira um ErrorRecord terminante -- e um "Cloning into ..." perfeitamente
+# normal derruba o script. Rodar essas chamadas por aqui isola o efeito.
+# git, winget and friends write progress to STDERR. In PowerShell 5.1 with
+# ErrorActionPreference=Stop, every stderr line from a native executable
+# becomes a terminating ErrorRecord -- a perfectly normal "Cloning into ..."
+# kills the script. Running those calls through here contains it.
+function Invoke-Native {
+    param([Parameter(Mandatory)][scriptblock]$Command)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $old }
+}
+
 function Write-Step { param([string]$m) Write-Host "`n>>> $m" -ForegroundColor Cyan }
 # throw, nunca "exit": este script roda como scriptblock direto no console --
 # "exit" fecharia a janela do PowerShell levando a mensagem de erro junto.
@@ -85,7 +100,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         Die 'git e winget ausentes / git and winget missing. Instale o Git: https://git-scm.com/download/win'
     }
     Write-Host '    instalando o Git via winget / installing Git via winget'
-    & winget install --id Git.Git --silent --accept-package-agreements --accept-source-agreements
+    Invoke-Native { & winget install --id Git.Git --silent --accept-package-agreements --accept-source-agreements }
     $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                 [Environment]::GetEnvironmentVariable('Path','User')
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -97,11 +112,12 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 Write-Step 'Repositorio / Repository'
 if (Test-Path (Join-Path $CheckoutDir '.git')) {
     Write-Host "    ja clonado em $CheckoutDir -- atualizando / already cloned, updating"
-    & git -C $CheckoutDir fetch --depth 1 origin $Ref
-    & git -C $CheckoutDir reset --hard "origin/$Ref"
+    Invoke-Native { & git -C $CheckoutDir fetch --depth 1 origin $Ref }
+    Invoke-Native { & git -C $CheckoutDir reset --hard "origin/$Ref" }
+    if ($LASTEXITCODE -ne 0) { Die "falha ao atualizar / update failed: $CheckoutDir" }
 } else {
     Write-Host "    clonando em / cloning into $CheckoutDir"
-    & git clone --depth 1 --branch $Ref $RepoUrl $CheckoutDir
+    Invoke-Native { & git clone --depth 1 --branch $Ref $RepoUrl $CheckoutDir }
     if ($LASTEXITCODE -ne 0) { Die "falha no clone / clone failed: $RepoUrl" }
 }
 
