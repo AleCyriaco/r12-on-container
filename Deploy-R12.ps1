@@ -175,6 +175,20 @@ function Write-Warn2 { param([string]$m) Write-Host "    AVISO: $m" -ForegroundC
 # closes taking the error message with it, looking like a crash.
 function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColor Red; throw "deploy interrompido: $m" }
 
+# Executa um comando nativo com stderr redirecionado SEM o efeito colateral do
+# PowerShell 5.1: sob ErrorActionPreference=Stop, "2>&1"/"2>$null" em nativo
+# transforma cada linha de stderr em excecao. Aqui a preferencia e relaxada so
+# durante a chamada.
+# Runs a native command with stderr redirected WITHOUT the PS 5.1 side effect:
+# under ErrorActionPreference=Stop, "2>&1"/"2>$null" on natives turns stderr
+# lines into thrown exceptions. Preference is relaxed only for the call.
+function Invoke-Native {
+    param([Parameter(Mandatory)][scriptblock]$Command)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $old }
+}
+
 function Should-Run {
     param([string]$Phase)
     if ($From -eq 'All') { return $true }
@@ -213,7 +227,7 @@ function Invoke-Vm {
         & podman machine ssh $MachineName "setsid nohup bash $wslPath > $logWsl 2>&1 < /dev/null & echo ok" | Out-Null
         return
     }
-    $out = & podman machine ssh $MachineName "bash $wslPath" 2>&1
+    $out = Invoke-Native { & podman machine ssh $MachineName "bash $wslPath" 2>&1 }
     if ($PassThru) { return $out }
     $out | ForEach-Object { Write-Host "    $_" }
 }
@@ -458,7 +472,7 @@ if (Should-Run 'Podman') {
 if (Should-Run 'Machine') {
     Write-Phase 'Machine'
 
-    $existing = @(& podman machine list --format '{{.Name}}' 2>$null)
+    $existing = @(Invoke-Native { & podman machine list --format '{{.Name}}' 2>$null })
     $vmDir    = Join-Path $TargetDir 'vm'
     $jaExiste = $existing | Where-Object { $_ -replace '\*$','' -eq $MachineName }
 
@@ -510,12 +524,38 @@ if (Should-Run 'Machine') {
         Write-Ok "a maquina '$MachineName' ja existe"
     } else {
         Write-Info "criando a maquina ($Cpus CPUs, $MemoryMB MB, $DiskGB GB)"
-        & podman machine init $MachineName --cpus $Cpus --memory $MemoryMB --disk-size $DiskGB
-        if ($LASTEXITCODE -ne 0) {
-            # nao deixar registro pela metade: um init que falhou no meio (ex.
-            # no import do WSL) as vezes registra a maquina sem VM por tras, e
-            # a proxima execucao acharia que "ja existe"
-            & podman machine rm -f $MachineName 2>&1 | Out-Null
+        # via cmd /c com redirecionamento do PROPRIO cmd: no PowerShell 5.1,
+        # "2>&1" em comando nativo com ErrorActionPreference=Stop transforma
+        # cada linha de stderr em excecao -- e o erro real morre no meio.
+        # cmd /c with cmd's own redirection: in PS 5.1, "2>&1" on a native
+        # command under ErrorActionPreference=Stop turns stderr into thrown
+        # exceptions, killing the real error message mid-flight.
+        $initLog = Join-Path $script:LogsDir 'podman-init.log'
+        & cmd /c "podman machine init $MachineName --cpus $Cpus --memory $MemoryMB --disk-size $DiskGB > `"$initLog`" 2>&1"
+        $initRc  = $LASTEXITCODE
+        Get-Content $initLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+        if ($initRc -ne 0) {
+            # nao deixar registro pela metade: um init que falhou no import do
+            # WSL as vezes registra a maquina sem VM por tras, e a proxima
+            # execucao acharia que "ja existe"
+            & cmd /c "podman machine rm -f $MachineName >nul 2>&1"
+            $initTxt = ''
+            if (Test-Path $initLog) { $initTxt = Get-Content $initLog -Raw }
+            if ($initTxt -match 'HCS_E_HYPERV_NOT_INSTALLED|virtualization is not enabled') {
+                Write-Host ''
+                Write-Host 'A virtualizacao nao esta funcional neste Windows. O conserto (uma vez so):' -ForegroundColor Yellow
+                Write-Host '  1. PowerShell COMO ADMINISTRADOR:  wsl.exe --install --no-distribution' -ForegroundColor Yellow
+                Write-Host '  2. REINICIE o Windows' -ForegroundColor Yellow
+                Write-Host '  3. Rode este mesmo comando de novo' -ForegroundColor Yellow
+                Write-Host 'Se falhar de novo com o MESMO erro: maquina fisica -> habilite VT-x/AMD-V na BIOS;' -ForegroundColor Yellow
+                Write-Host 'maquina virtual -> habilite a virtualizacao aninhada no hypervisor dela.' -ForegroundColor Yellow
+                Write-Host '---' -ForegroundColor Yellow
+                Write-Host 'Virtualisation is not functional on this Windows. One-time fix:' -ForegroundColor Yellow
+                Write-Host '  1. PowerShell AS ADMINISTRATOR:  wsl.exe --install --no-distribution' -ForegroundColor Yellow
+                Write-Host '  2. REBOOT Windows' -ForegroundColor Yellow
+                Write-Host '  3. Re-run this same command' -ForegroundColor Yellow
+                Die 'virtualizacao indisponivel (HCS_E_HYPERV_NOT_INSTALLED)'
+            }
             Die 'falha no podman machine init'
         }
 
@@ -526,7 +566,7 @@ if (Should-Run 'Machine') {
             Write-Info "movendo o disco da VM para $vmDir"
             # o vhdx fica travado enquanto a VM utilitaria do WSL estiver viva
             # (ERROR_SHARING_VIOLATION); derrubar o WSL inteiro e o unico jeito.
-            & podman machine stop $MachineName 2>&1 | Out-Null
+            & cmd /c "podman machine stop $MachineName >nul 2>&1"
             & wsl --shutdown
             Start-Sleep -Seconds 5
             & wsl --manage "podman-$MachineName" --move $vmDir
@@ -539,7 +579,7 @@ if (Should-Run 'Machine') {
         & podman machine set $MachineName --rootful | Out-Null
     }
 
-    $running = @(& podman machine list --format '{{.Name}} {{.LastUp}}' 2>$null) |
+    $running = @(Invoke-Native { & podman machine list --format '{{.Name}} {{.LastUp}}' 2>$null }) |
                Where-Object { $_ -like "$MachineName*" -and $_ -like '*Currently running*' }
     if (-not $running) {
         Write-Info 'iniciando a maquina'
