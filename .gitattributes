@@ -1,0 +1,12 @@
+# Scripts bash PRECISAM de LF. Com CRLF o bash quebra com erros obscuros
+# ("bad interpreter", "\r: command not found") -- e a armadilha que mais custou
+# tempo neste projeto.
+# Bash scripts MUST use LF. CRLF breaks bash with cryptic errors.
+*.sh        text eol=lf
+
+# PowerShell no Windows: CRLF e o esperado.
+*.ps1       text eol=crlf
+*.psd1      text eol=crlf
+
+*.md        text eol=lf
+.gitignore  text eol=lf

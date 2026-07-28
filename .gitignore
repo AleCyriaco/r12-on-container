@@ -1,0 +1,31 @@
+# Credenciais e configuracao local -- NUNCA commitar
+# Local credentials and configuration -- NEVER commit
+config.psd1
+*.local.psd1
+
+# Artefatos de execucao / runtime artifacts
+logs/
+vm/
+pkg/
+upload/
+*.tar.zst
+*.tar.zst.part*
+manifest.txt
+
+# Scripts .sh gerados em tempo de execucao pelo Deploy-R12.ps1.
+# Contem a senha do WebLogic ja substituida -- nao devem sair da maquina.
+# Runtime-generated .sh files: they carry the substituted WebLogic password.
+scripts/download.sh
+scripts/services.sh
+scripts/extract.sh
+scripts/container.sh
+scripts/verify.sh
+scripts/sysctl.sh
+scripts/sga.sh
+scripts/vm-info.sh
+
+# Windows / editores
+Thumbs.db
+desktop.ini
+.vscode/
+NUL
