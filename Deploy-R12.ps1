@@ -131,7 +131,8 @@ if (-not $driveRoot -or -not (Test-Path -LiteralPath $driveRoot)) {
     Write-Host "      Passe -TargetDir apontando para um drive real, ex.: -TargetDir '$sugestao'" -ForegroundColor Red
     Write-Host "ERROR: the drive for '$TargetDir' does not exist or is not usable on this machine." -ForegroundColor Red
     Write-Host "       Pass -TargetDir pointing at a real drive, e.g. -TargetDir '$sugestao'" -ForegroundColor Red
-    exit 1
+    # throw, nao "exit": em memoria o exit fecharia a janela do PowerShell
+    throw "drive de '$TargetDir' indisponivel"
 }
 
 $script:PhaseOrder = @('Preflight','Podman','Machine','Download','Extract','Container','Services','Verify')
@@ -142,7 +143,13 @@ function Write-Phase { param([string]$m) Write-Host "`n=== $m ===" -ForegroundCo
 function Write-Info  { param([string]$m) Write-Host "    $m" }
 function Write-Ok    { param([string]$m) Write-Host "    $m" -ForegroundColor Green }
 function Write-Warn2 { param([string]$m) Write-Host "    AVISO: $m" -ForegroundColor Yellow }
-function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColor Red; exit 1 }
+# Die usa THROW, nunca "exit": quando o script roda carregado em memoria (o
+# caminho normal via bootstrap), "exit" mata o processo inteiro do PowerShell
+# -- a janela fecha e leva a mensagem de erro junto, parecendo um crash.
+# Die THROWS, never "exit": loaded as an in-memory scriptblock (the normal
+# bootstrap path), "exit" kills the whole PowerShell process -- the window
+# closes taking the error message with it, looking like a crash.
+function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColor Red; throw "deploy interrompido: $m" }
 
 function Should-Run {
     param([string]$Phase)
@@ -198,7 +205,15 @@ function Wait-VmStep {
         if (Test-Path $logFile) {
             $lines = @(Get-Content $logFile -ErrorAction SilentlyContinue)
             if ($lines.Count -gt $shown) {
-                $lines[$shown..($lines.Count-1)] | ForEach-Object { Write-Host "    $_" }
+                $novas = @($lines[$shown..($lines.Count-1)])
+                # nunca inundar o console: rajadas grandes viram inicio + fim
+                if ($novas.Count -gt 40) {
+                    $novas[0..4]                              | ForEach-Object { Write-Host "    $_" }
+                    Write-Host "    ... ($($novas.Count - 15) linhas omitidas -- integra em $logFile)"
+                    $novas[($novas.Count-10)..($novas.Count-1)] | ForEach-Object { Write-Host "    $_" }
+                } else {
+                    $novas | ForEach-Object { Write-Host "    $_" }
+                }
                 $shown = $lines.Count
             }
         }
@@ -529,9 +544,19 @@ gdrive_get() {
     CONF=$(grep -o 'name="confirm" value="[^"]*"' "$TMP" | sed 's/.*value="//;s/"//')
     [ -z "$CONF" ] && CONF=t
     rm -f "$TMP"
-    curl -L -C - -b "$CK" --retry 5 --retry-delay 10 --retry-all-errors \
+    # -sS: sem o medidor de progresso o log nao incha (o medidor gera linhas
+    # imensas cheias de \r que depois inundam o console de quem acompanha),
+    # mas erros continuam visiveis. O progresso vira UMA linha por minuto,
+    # impressa pelo watcher abaixo.
+    curl -sS -L -C - -b "$CK" --retry 5 --retry-delay 10 --retry-all-errors \
          -o "$OUT" \
-         "https://drive.usercontent.google.com/download?id=${ID}&export=download&confirm=${CONF}&uuid=${UUID}"
+         "https://drive.usercontent.google.com/download?id=${ID}&export=download&confirm=${CONF}&uuid=${UUID}" &
+    local CPID=$!
+    while kill -0 $CPID 2>/dev/null; do
+      sleep 60
+      kill -0 $CPID 2>/dev/null && echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $(basename "$OUT")"
+    done
+    wait $CPID
   else
     mv "$TMP" "$OUT"
   fi

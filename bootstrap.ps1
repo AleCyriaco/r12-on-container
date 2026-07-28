@@ -62,7 +62,11 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
 function Write-Step { param([string]$m) Write-Host "`n>>> $m" -ForegroundColor Cyan }
-function Die        { param([string]$m) Write-Host "`nERRO / ERROR: $m" -ForegroundColor Red; exit 1 }
+# throw, nunca "exit": este script roda como scriptblock direto no console --
+# "exit" fecharia a janela do PowerShell levando a mensagem de erro junto.
+# throw, never "exit": this runs as a scriptblock right in the console --
+# "exit" would close the PowerShell window taking the error message with it.
+function Die        { param([string]$m) Write-Host "`nERRO / ERROR: $m" -ForegroundColor Red; throw "bootstrap interrompido: $m" }
 
 Write-Host @'
 
