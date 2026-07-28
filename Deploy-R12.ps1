@@ -71,8 +71,8 @@ param(
     [string]$ImageFileId,
     [string]$TargetDir   = 'D:\R12OnContainer',
     [string]$MachineName = 'ebs',
-    [int]$Cpus           = 8,
-    [int]$MemoryMB       = 40960,
+    [int]$Cpus           = 0,       # 0 = automatico: min(8, CPUs do host)
+    [int]$MemoryMB       = 0,       # 0 = automatico, conforme a RAM do host
     [int]$DiskGB         = 600,
     [string]$WlsPassword,
     [string]$AppsPassword,
@@ -113,6 +113,30 @@ if (Test-Path $ConfigFile) {
     if (-not $PSBoundParameters.ContainsKey('TargetDir') -and $cfg.TargetDir) { $TargetDir = $cfg.TargetDir }
 }
 if (-not $AppsPassword) { $AppsPassword = 'apps' }   # usuario do schema, nao a senha do WLS
+
+# ------------------------------------------------------------- dimensionamento
+# A VM e a SGA se ajustam a RAM do host. Referencias do pacote de origem:
+# SGA 20G pede VM de ~40 GB; SGA 8G funciona em VM de ~16 GB. Abaixo disso e
+# territorio de swap: sobe, mas lento.
+# VM and SGA auto-size to host RAM. From the source package: 20G SGA wants a
+# ~40 GB VM; 8G SGA runs in ~16 GB. Below that it swaps: it boots, slowly.
+$hw          = Get-CimInstance Win32_ComputerSystem
+$hostRamGb   = [math]::Round($hw.TotalPhysicalMemory/1GB, 1)
+$hostCpus    = [int]$hw.NumberOfLogicalProcessors
+
+if ($Cpus -le 0) { $Cpus = [Math]::Max(2, [Math]::Min(8, $hostCpus)) }
+
+if ($MemoryMB -le 0) {
+    if     ($hostRamGb -ge 47) { $MemoryMB = 40960 }                                      # padrao do pacote
+    elseif ($hostRamGb -ge 23) { $MemoryMB = [int]([math]::Floor($hostRamGb - 8) * 1024) } # sobra 8 pro Windows
+    else                       { $MemoryMB = [int]([math]::Floor($hostRamGb - 4) * 1024) } # host de 16 GB -> VM ~11-12
+}
+
+# SGA: so mexe se o usuario nao escolheu e a VM nao comporta os 20G do pacote.
+# O corte de 15 GB vem do pacote de origem: SGA 8G testada em VM de ~16 GB.
+if ($SgaGb -le 0 -and $MemoryMB -lt 38912) {
+    if ($MemoryMB -ge 15360) { $SgaGb = 8 } else { $SgaGb = 4 }
+}
 
 # ---------------------------------------------------------------- infraestrutura
 
@@ -339,12 +363,20 @@ if (Should-Run 'Preflight') {
     Write-Info "RAM fisica    : $ramGb GB"
     Write-Info "CPUs logicas  : $($cs.NumberOfLogicalProcessors)"
     Write-Info "livre em $drive    : $freeGb GB  (necessario ~$needGb GB)"
+    Write-Info ("plano         : VM {0:N0} MB, {1} CPUs{2}" -f $MemoryMB, $Cpus,
+        $(if ($SgaGb -gt 0) { ", SGA reduzida para ${SgaGb}G" } else { ', SGA 20G do pacote' }))
 
     if ($freeGb -lt $needGb) { Die "espaco insuficiente em $drive" }
 
-    if ($ramGb -lt 48 -and $SgaGb -eq 0) {
-        Write-Warn2 'menos de 48 GB de RAM com SGA de 20 GB: o banco pode nao subir.'
-        Write-Warn2 'considere reexecutar com -SgaGb 8 (funciona com ~16 GB de VM).'
+    # Minimo absoluto: 16 GB de RAM no host (15 medidos -- o Windows sempre
+    # reporta um pouco menos que o nominal).
+    if ($ramGb -lt 15) {
+        Die ("RAM insuficiente: $ramGb GB. O minimo e 16 GB -- e mesmo com 16 GB " +
+             'a instancia sobe com SGA reduzida e desempenho limitado.')
+    }
+    if ($ramGb -lt 23) {
+        Write-Warn2 "host com $ramGb GB: a VM fica com ~$([math]::Round($MemoryMB/1024)) GB e a SGA cai para ${SgaGb}G."
+        Write-Warn2 'vai subir, mas espere swap e lentidao -- 48 GB e o recomendado.'
     }
 
     if (-not $cs.HypervisorPresent) {
@@ -401,6 +433,50 @@ if (Should-Run 'Machine') {
     $vmDir    = Join-Path $TargetDir 'vm'
     $jaExiste = $existing | Where-Object { $_ -replace '\*$','' -eq $MachineName }
 
+    # O WSL limita a VM a ~metade da RAM do host por padrao, ignorando o que o
+    # podman pedir. Num host de 16 GB a VM ficaria com 8 GB -- insuficiente ate
+    # para a SGA reduzida. Se o padrao do WSL nao comporta o que precisamos,
+    # ajustamos o %USERPROFILE%\.wslconfig (com backup) e derrubamos o WSL para
+    # a mudanca valer. Em hosts grandes, onde a metade ja basta, nada e tocado.
+    # WSL caps the VM at ~half the host RAM regardless of what podman asks.
+    # If that default is not enough, patch %USERPROFILE%\.wslconfig (backed up)
+    # and restart WSL. On big hosts where half is already enough, touch nothing.
+    $vmGbAlvo = [int][math]::Ceiling($MemoryMB / 1024)
+    if (($hostRamGb / 2) -lt $vmGbAlvo) {
+        $wslCfg  = Join-Path $env:USERPROFILE '.wslconfig'
+        $memLine = "memory=${vmGbAlvo}GB"
+        $mudou   = $false
+        if (Test-Path $wslCfg) {
+            $txt = [IO.File]::ReadAllText($wslCfg)
+            $m = [regex]::Match($txt, '(?im)^\s*memory\s*=\s*(\d+)\s*GB')
+            if ($m.Success -and [int]$m.Groups[1].Value -ge $vmGbAlvo) {
+                # ja comporta; nao tocar
+            } else {
+                Copy-Item $wslCfg "$wslCfg.bak" -Force
+                if ($m.Success) {
+                    $txt = ([regex]'(?im)^\s*memory\s*=.*$').Replace($txt, $memLine, 1)
+                } elseif ($txt -match '(?im)^\s*\[wsl2\]') {
+                    $txt = ([regex]'(?im)^(\s*\[wsl2\]\s*)$').Replace($txt, "`$1`r`n$memLine", 1)
+                } else {
+                    $txt = "[wsl2]`r`n$memLine`r`n" + $txt
+                }
+                [IO.File]::WriteAllText($wslCfg, $txt)
+                Write-Ok "ajustado $wslCfg -> $memLine (backup em .wslconfig.bak)"
+                $mudou = $true
+            }
+        } else {
+            $novo = "[wsl2]`r`n$memLine`r`nprocessors=$Cpus`r`nswap=16GB`r`n"
+            [IO.File]::WriteAllText($wslCfg, $novo)
+            Write-Ok "criado $wslCfg ($memLine, processors=$Cpus, swap=16GB)"
+            $mudou = $true
+        }
+        if ($mudou) {
+            Write-Info 'reiniciando o WSL para o novo limite valer (para outras distros tambem)'
+            & wsl --shutdown
+            Start-Sleep -Seconds 5
+        }
+    }
+
     if ($jaExiste) {
         Write-Ok "a maquina '$MachineName' ja existe"
     } else {
@@ -448,10 +524,12 @@ echo "freegb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
         if ($l -match 'memgb=(\d+)')  { $vmMem  = [int]$Matches[1] }
         if ($l -match 'freegb=(\d+)') { $vmFree = [int]$Matches[1] }
     }
-    Write-Info "a VM tem $vmMem GB de RAM e $vmFree GB livres"
-    if ($vmMem -lt 40 -and $SgaGb -eq 0) {
-        Write-Warn2 'a VM tem menos de 40 GB: a SGA de 20 GB nao vai caber.'
-        Write-Warn2 'ajuste o %USERPROFILE%\.wslconfig (memory=40GB) ou use -SgaGb 8'
+    Write-Info "a VM tem $vmMem GB de RAM e $vmFree GB livres (alvo: ~$([math]::Round($MemoryMB/1024)) GB)"
+    $sgaNecessariaGb = 20
+    if ($SgaGb -gt 0) { $sgaNecessariaGb = $SgaGb }
+    if ($vmMem -lt ($sgaNecessariaGb + 6)) {
+        Write-Warn2 "a VM tem $vmMem GB para uma SGA de ${sgaNecessariaGb}G + WebLogic: nao deve caber."
+        Write-Warn2 'confira o %USERPROFILE%\.wslconfig (memory=...) e rode de novo com -From Machine'
     }
 
     Write-Info 'aplicando os ajustes de kernel do Oracle'

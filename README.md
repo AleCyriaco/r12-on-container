@@ -14,14 +14,25 @@ extracts, creates the container and brings the whole stack up.
 
 ## Requirements
 
-| | Minimum | Why |
-|---|---|---|
-| Windows | 11 or Server 2022 | WSL2 |
-| RAM | 48 GB | 20 GB SGA + 4 GB PGA + WebLogic (~8 GB) + slack |
-| Free disk | ~345 GB | 274 GB extracted + 58 GB package |
-| CPUs | 6–8 | `adop` uses 32 workers; fewer still works, just slower |
+| | Minimum | Recommended | Why |
+|---|---|---|---|
+| Windows | 11 or Server 2022 | — | WSL2 |
+| RAM | **16 GB** | 48 GB | at 48 GB+ the package's 20 GB SGA runs as-is |
+| Free disk | ~345 GB | — | 274 GB extracted + 58 GB package |
+| CPUs | 2 | 8 | `adop` uses 32 workers; fewer works, just slower |
 
-Below 48 GB of RAM, shrink the SGA with `-SgaGb 8` — that runs in a ~16 GB VM.
+**Sizing is automatic.** The script reads the host's RAM and sizes the WSL2 VM
+and the Oracle SGA to match — including adjusting `%USERPROFILE%\.wslconfig`
+(backed up first) when WSL's default cap of half the host RAM is not enough:
+
+| Host RAM | VM | SGA |
+|---|---|---|
+| 48 GB+ | 40 GB | 20 GB (package default) |
+| 23–47 GB | host − 8 GB | 8 GB |
+| 16–22 GB | host − 4 GB | 4 GB |
+
+On a 16 GB host it boots and works, but swaps — expect it to be slow. Override
+with `-MemoryMB`, `-Cpus`, `-SgaGb` if you know better.
 
 Virtualisation must be enabled in BIOS/UEFI.
 

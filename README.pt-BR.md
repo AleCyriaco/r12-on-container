@@ -14,15 +14,25 @@ extrai, cria o container e sobe a pilha inteira.
 
 ## Requisitos
 
-| | Mínimo | Porquê |
-|---|---|---|
-| Windows | 11 ou Server 2022 | WSL2 |
-| RAM | 48 GB | SGA de 20 GB + PGA de 4 GB + WebLogic (~8 GB) + folga |
-| Disco livre | ~345 GB | 274 GB extraídos + 58 GB do pacote |
-| CPUs | 6–8 | o `adop` usa 32 workers; abaixo disso funciona, mas fica lento |
+| | Mínimo | Recomendado | Porquê |
+|---|---|---|---|
+| Windows | 11 ou Server 2022 | — | WSL2 |
+| RAM | **16 GB** | 48 GB | com 48 GB+ a SGA de 20 GB do pacote roda como veio |
+| Disco livre | ~345 GB | — | 274 GB extraídos + 58 GB do pacote |
+| CPUs | 2 | 8 | o `adop` usa 32 workers; com menos funciona, só mais lento |
 
-Com menos de 48 GB de RAM, reduza a SGA com `-SgaGb 8` — isso roda numa VM de
-~16 GB.
+**O dimensionamento é automático.** O script lê a RAM do host e ajusta a VM
+WSL2 e a SGA do Oracle — inclusive corrigindo o `%USERPROFILE%\.wslconfig`
+(com backup) quando o teto padrão do WSL, metade da RAM do host, não basta:
+
+| RAM do host | VM | SGA |
+|---|---|---|
+| 48 GB+ | 40 GB | 20 GB (padrão do pacote) |
+| 23–47 GB | host − 8 GB | 8 GB |
+| 16–22 GB | host − 4 GB | 4 GB |
+
+Num host de 16 GB sobe e funciona, mas com swap — espere lentidão. Se souber
+melhor, sobrescreva com `-MemoryMB`, `-Cpus`, `-SgaGb`.
 
 A virtualização precisa estar habilitada na BIOS/UEFI.
 
