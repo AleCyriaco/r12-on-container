@@ -122,10 +122,25 @@ if (-not $WlsPassword -and -not (Test-Path $cfgFile)) {
 
 # ---------------------------------------------------------------------- deploy
 Write-Step 'Deploy'
+
+# Este proprio arquivo roda por scriptblock vindo da web, o que nao esbarra na
+# ExecutionPolicy -- mas invocar um .ps1 DE ARQUIVO esbarra. Liberamos so no
+# escopo do processo: nao persiste, nao exige Administrador, morre com a janela.
+# This file runs as a scriptblock from the web, which bypasses ExecutionPolicy --
+# but invoking a .ps1 FILE does not. Relax it for this process only: it does not
+# persist, needs no elevation, and dies with the window.
+try {
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
+    Write-Host '    ExecutionPolicy do processo: Bypass'
+} catch {
+    Write-Host '    nao consegui ajustar a ExecutionPolicy (Group Policy?) -- usando scriptblock' -ForegroundColor Yellow
+}
+
 $argumentos = @{
     TargetDir   = $TargetDir
     MachineName = $MachineName
     From        = $From
+    ConfigFile  = $cfgFile      # sempre explicito: no fallback nao ha $PSScriptRoot
 }
 if ($FolderUrl)    { $argumentos.FolderUrl    = $FolderUrl }
 if ($WlsPassword)  { $argumentos.WlsPassword  = $WlsPassword }
@@ -133,4 +148,12 @@ if ($AppsPassword) { $argumentos.AppsPassword = $AppsPassword }
 if ($SgaGb -gt 0)  { $argumentos.SgaGb        = $SgaGb }
 if ($KeepFs2)      { $argumentos.KeepFs2      = $true }
 
-& $deploy @argumentos
+try {
+    & $deploy @argumentos
+} catch [System.Management.Automation.PSSecurityException] {
+    # Group Policy pode vetar ate o escopo de processo. Ler o arquivo e criar um
+    # scriptblock contorna, porque a politica se aplica a ARQUIVOS, nao a codigo
+    # ja em memoria.
+    Write-Host '    ExecutionPolicy bloqueou o arquivo -- carregando como scriptblock' -ForegroundColor Yellow
+    & ([scriptblock]::Create([IO.File]::ReadAllText($deploy))) @argumentos
+}
