@@ -76,6 +76,70 @@ cat /tmp/h > /etc/hosts
 
 ---
 
+## Tudo quebra depois de reiniciar o container
+
+Sintoma após um reboot ou `podman start`: `ORA-12560: TNS:protocol adapter
+error` em qualquer conexão `@EBSDB`, e o `adstrtal.sh` reportando *"Database
+connection could not be established. Either the database is down or the APPS
+credentials supplied are wrong"* — com o banco comprovadamente aberto e as
+credenciais comprovadamente certas.
+
+**Causa.** O Podman **regenera o `/etc/hosts` a cada start do container.** A
+linha com o nome canônico completo some; sobra só o `<IP> apps ebs` que o
+próprio Podman cria. O `tnsnames.ora` aponta para o nome completo, então a
+resolução falha e toda conexão TNS morre.
+
+Não é o mesmo problema de ordenação do nome canônico logo abaixo — aquele é
+sobre *qual* nome vence. Este é a linha sumir por inteiro, e ele volta toda
+vez que o container inicia.
+
+**Correção.** Reaplicar a cada start, antes de subir qualquer coisa. É o que o
+`scripts/bringup.sh` faz:
+
+```bash
+IP=$(podman inspect ebs --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+podman exec -i ebs bash -s <<EOF
+grep -v -e 'apps.example.com' -e 'apps ebs\$' /etc/hosts > /tmp/h
+printf '%s\tapps.example.com apps ebs\n' '$IP' >> /tmp/h
+cat /tmp/h > /etc/hosts
+EOF
+```
+
+Se o listener já tinha subido antes da correção, reinicie-o para ele ligar no
+nome certo — `lsnrctl stop && lsnrctl start` do home 19.0.0, nunca
+`pkill -f tnslsnr`.
+
+---
+
+## O adstrtal.sh acusa credenciais do APPS logo após o startup
+
+Mesma mensagem enganosa da anterior, mas o banco *está* acessível quando você
+confere na mão.
+
+**Causa.** Corrida. O `startup` retorna assim que o banco abre, mas o serviço
+só é registrado no listener quando o PMON o faz — até 60 segundos depois. O
+`adstrtal.sh` rodando nessa janela não consegue conectar, e reporta isso como
+problema de credenciais.
+
+**Correção.** Forçar o registro e esperar uma conexão real antes de subir a
+pilha de aplicação:
+
+```bash
+sqlplus -s / as sysdba <<< "alter system register;"
+```
+
+e então repetir até isto realmente retornar uma linha:
+
+```bash
+sqlplus -s -L apps/apps@EBSDB <<'SQL'
+set heading off feedback off pagesize 0
+select 'PRONTO' from dual;
+exit
+SQL
+```
+
+---
+
 ## "Database connection could not be established" depois de reiniciar
 
 ```

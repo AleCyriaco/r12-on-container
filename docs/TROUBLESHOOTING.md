@@ -75,6 +75,70 @@ cat /tmp/h > /etc/hosts
 
 ---
 
+## Everything breaks after restarting the container
+
+Symptom after a reboot or `podman start`: `ORA-12560: TNS:protocol adapter
+error` on any `@EBSDB` connection, and `adstrtal.sh` reporting
+*"Database connection could not be established. Either the database is down or
+the APPS credentials supplied are wrong"* — with a database that is demonstrably
+open and credentials that are demonstrably correct.
+
+**Cause.** Podman **regenerates `/etc/hosts` on every container start.** The
+line carrying the fully-qualified canonical name is gone; only Podman's own
+`<IP> apps ebs` survives. `tnsnames.ora` points at the fully-qualified name, so
+resolution fails and every TNS connection dies.
+
+This is not the same as the canonical-name ordering problem below — that one is
+about *which* name wins. This one is the line vanishing entirely, and it comes
+back every single time the container starts.
+
+**Fix.** Re-apply it on every start, before starting anything else. This is what
+`scripts/bringup.sh` does:
+
+```bash
+IP=$(podman inspect ebs --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+podman exec -i ebs bash -s <<EOF
+grep -v -e 'apps.example.com' -e 'apps ebs\$' /etc/hosts > /tmp/h
+printf '%s\tapps.example.com apps ebs\n' '$IP' >> /tmp/h
+cat /tmp/h > /etc/hosts
+EOF
+```
+
+If the listener was already started before the fix, restart it so it binds to
+the right name — `lsnrctl stop && lsnrctl start` from the 19.0.0 home, never
+`pkill -f tnslsnr`.
+
+---
+
+## adstrtal.sh blames the APPS credentials right after a startup
+
+Same misleading message as above, but the database *is* reachable by the time
+you check by hand.
+
+**Cause.** A race. `startup` returns as soon as the database is open, but the
+service is only registered with the listener when PMON gets around to it —
+up to 60 seconds later. `adstrtal.sh` running in that gap cannot connect, and
+reports it as a credentials problem.
+
+**Fix.** Force registration and wait for a real connection before starting the
+application tier:
+
+```bash
+sqlplus -s / as sysdba <<< "alter system register;"
+```
+
+then poll until this actually returns a row:
+
+```bash
+sqlplus -s -L apps/apps@EBSDB <<'SQL'
+set heading off feedback off pagesize 0
+select 'PRONTO' from dual;
+exit
+SQL
+```
+
+---
+
 ## "Database connection could not be established" after a restart
 
 ```

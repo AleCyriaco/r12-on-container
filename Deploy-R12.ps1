@@ -974,11 +974,49 @@ SQL
 set -uo pipefail
 CTR=ebs
 
+# O podman REGENERA o /etc/hosts a cada start do container, perdendo a linha do
+# nome canonico. O tnsnames aponta para esse nome: sem reaplicar, o banco fica
+# inacessivel com ORA-12560 e o adstrtal acusa "credenciais erradas".
+# podman REGENERATES /etc/hosts on every container start; without re-applying
+# the canonical-name line the database is unreachable and adstrtal blames the
+# credentials for what is a name-resolution problem.
+echo "[*] reaplicando o nome canonico no /etc/hosts"
+IP=$(podman inspect "$CTR" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+podman exec -i "$CTR" bash -s <<EOF
+grep -v -e '__APPSHOST__' -e 'apps ebs\$' /etc/hosts > /tmp/h
+printf '%s\t%s apps ebs\n' '$IP' '__APPSHOST__' >> /tmp/h
+cat /tmp/h > /etc/hosts
+EOF
+
 echo "[*] banco + listener"
+# stop+start: se o listener subiu antes da correcao do /etc/hosts esta com o
+# binding errado. Sempre "lsnrctl stop" no ORACLE_HOME certo, nunca
+# "pkill -f tnslsnr" -- esse padrao derruba tambem o listener do apps tier.
 podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/19.0.0/EBSCDB_apps.env
-  lsnrctl start
-  sqlplus -s / as sysdba <<< "startup;"' 2>&1 | tail -6
+  lsnrctl stop  >/dev/null 2>&1
+  lsnrctl start >/dev/null 2>&1
+  sqlplus -s / as sysdba <<< "startup;"
+  sqlplus -s / as sysdba <<< "alter system register;" >/dev/null 2>&1' 2>&1 | tail -6
+
+# Esperar o servico aceitar conexao ANTES do adstrtal: rodar na janela entre
+# "banco aberto" e "servico registrado" produz a mesma mensagem enganosa sobre
+# credenciais do APPS.
+echo "[*] aguardando o servico EBSDB registrar"
+db_pronto() {
+  podman exec -i -u oracle "$CTR" bash -lc "
+    source /u01/install/APPS/EBSapps.env run >/dev/null 2>&1
+    sqlplus -s -L apps/__APPSPWD__@EBSDB" <<'SQL' 2>/dev/null | grep -q PRONTO
+set heading off feedback off pagesize 0
+select 'PRONTO' from dual;
+exit
+SQL
+}
+for i in $(seq 1 30); do
+  if db_pronto; then echo "    disponivel apos $((i*5))s"; break; fi
+  [ "$i" = "30" ] && echo "    AVISO: sem resposta em 150s -- seguindo assim mesmo"
+  sleep 5
+done
 
 echo "[*] pilha de aplicacao"
 # adstrtal.sh pede a senha do WebLogic NO STDIN. Sem "podman exec -i" ela chega
@@ -1011,7 +1049,7 @@ echo "[*] services OK"
 '@
 
     Invoke-Vm -Name 'services' -Detached -Script `
-        $svcTpl.Replace('__WLSPWD__', $WlsPassword).Replace('__APPSPWD__', $AppsPassword)
+        $svcTpl.Replace('__WLSPWD__', $WlsPassword).Replace('__APPSPWD__', $AppsPassword).Replace('__APPSHOST__', $AppsHost)
     Wait-VmStep -Name 'services' -TimeoutMin 90
     Write-Ok 'servicos iniciados'
 }
