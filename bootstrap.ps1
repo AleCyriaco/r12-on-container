@@ -129,18 +129,15 @@ Write-Step 'Deploy'
 # This file runs as a scriptblock from the web, which bypasses ExecutionPolicy --
 # but invoking a .ps1 FILE does not. Relax it for this process only: it does not
 # persist, needs no elevation, and dies with the window.
-try {
-    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
-    Write-Host '    ExecutionPolicy do processo: Bypass'
-} catch {
-    Write-Host '    nao consegui ajustar a ExecutionPolicy (Group Policy?) -- usando scriptblock' -ForegroundColor Yellow
-}
+# Best-effort: ajuda quem depois quiser rodar o .ps1 direto nesta mesma janela.
+# Nao dependemos disso -- Group Policy pode vetar ate o escopo de processo.
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch { }
 
 $argumentos = @{
     TargetDir   = $TargetDir
     MachineName = $MachineName
     From        = $From
-    ConfigFile  = $cfgFile      # sempre explicito: no fallback nao ha $PSScriptRoot
+    ConfigFile  = $cfgFile      # sempre explicito: aqui nao ha $PSScriptRoot
 }
 if ($FolderUrl)    { $argumentos.FolderUrl    = $FolderUrl }
 if ($WlsPassword)  { $argumentos.WlsPassword  = $WlsPassword }
@@ -148,12 +145,15 @@ if ($AppsPassword) { $argumentos.AppsPassword = $AppsPassword }
 if ($SgaGb -gt 0)  { $argumentos.SgaGb        = $SgaGb }
 if ($KeepFs2)      { $argumentos.KeepFs2      = $true }
 
-try {
-    & $deploy @argumentos
-} catch [System.Management.Automation.PSSecurityException] {
-    # Group Policy pode vetar ate o escopo de processo. Ler o arquivo e criar um
-    # scriptblock contorna, porque a politica se aplica a ARQUIVOS, nao a codigo
-    # ja em memoria.
-    Write-Host '    ExecutionPolicy bloqueou o arquivo -- carregando como scriptblock' -ForegroundColor Yellow
-    & ([scriptblock]::Create([IO.File]::ReadAllText($deploy))) @argumentos
-}
+# SEMPRE por scriptblock, nunca invocando o arquivo.
+#
+# A ExecutionPolicy se aplica a ARQUIVOS de script, nao a codigo ja em memoria
+# -- e a mesma razao pela qual este bootstrap roda vindo do "irm". Carregar o
+# conteudo e criar um scriptblock funciona sob qualquer politica, inclusive
+# Restricted imposta por Group Policy, sem alterar nada na maquina.
+#
+# Tentar invocar o arquivo e cair num catch de PSSecurityException tambem
+# funcionaria na maioria dos casos, mas depende de a excecao ser capturavel
+# naquele ponto. Este caminho nao tem essa duvida.
+Write-Host '    carregando Deploy-R12.ps1 em memoria (contorna a ExecutionPolicy)'
+& ([scriptblock]::Create([IO.File]::ReadAllText($deploy))) @argumentos

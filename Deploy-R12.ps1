@@ -76,7 +76,7 @@ param(
     [int]$DiskGB         = 600,
     [string]$WlsPassword,
     [string]$AppsPassword,
-    [string]$ConfigFile  = (Join-Path $PSScriptRoot 'config.psd1'),
+    [string]$ConfigFile,
     [string]$AppsHost    = 'apps.example.com',
     [int]$SgaGb          = 0,
     [switch]$KeepFs2,
@@ -87,6 +87,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # Invoke-WebRequest fica muito mais rapido
+
+# Quando este script e carregado como scriptblock (para contornar a
+# ExecutionPolicy), $PSScriptRoot nao existe -- por isso o default do
+# ConfigFile e resolvido aqui, e nao no bloco param.
+# When loaded as a scriptblock (to work around ExecutionPolicy) there is no
+# $PSScriptRoot, so the ConfigFile default is resolved here, not in param().
+if (-not $ConfigFile) {
+    $base = $PSScriptRoot
+    if (-not $base) { $base = (Get-Location).Path }
+    $ConfigFile = Join-Path $base 'config.psd1'
+}
 
 # ------------------------------------------------------------------ credenciais
 # Nada de senha embutida: este repositorio e publico. Os valores vem do
