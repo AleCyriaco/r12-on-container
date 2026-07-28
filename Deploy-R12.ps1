@@ -768,6 +768,25 @@ baixa() {
       atual=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
       if [ "$atual" != "$SIZE" ]; then
         echo "    $NAME: tamanho $atual, esperado $SIZE"
+        # A cota do Drive nao adianta insistir em segundos: e limite por
+        # janela de tempo. Melhor parar na hora com a instrucao certa do que
+        # gastar a segunda tentativa e terminar com uma pagina HTML na tela.
+        if grep -qi 'Quota exceeded' "$OUT" 2>/dev/null; then
+          echo ""
+          echo "    >>> COTA DO GOOGLE DRIVE ESTOURADA <<<"
+          echo "    O Drive limita quanto um arquivo publico pode ser baixado por"
+          echo "    janela de tempo, e responde com uma pagina HTML em vez do arquivo."
+          echo "    Nao adianta repetir agora: espere algumas horas (ate 24h) e rode"
+          echo "    de novo com -From Download. As partes ja conferidas sao mantidas;"
+          echo "    so a que faltou sera baixada."
+          echo ""
+          echo "    >>> GOOGLE DRIVE QUOTA EXCEEDED <<<"
+          echo "    Wait a few hours (up to 24h) and re-run with -From Download."
+          echo "    Verified parts are kept; only the missing one is fetched."
+          echo ""
+          rm -f "$OUT"
+          return 1
+        fi
         head -c 200 "$OUT" 2>/dev/null; echo
         rm -f "$OUT"; continue
       fi
@@ -806,7 +825,14 @@ df -h /var | tail -1
     Wait-VmStep -Name 'download' -TimeoutMin 720
 
     $dlLog = Get-Content (Join-Path $script:LogsDir 'download.log') -Raw
-    if ($dlLog -notmatch 'download OK') { Die 'o download falhou; veja logs\download.log' }
+    if ($dlLog -notmatch 'download OK') {
+        if ($dlLog -match 'COTA DO GOOGLE DRIVE ESTOURADA|Quota exceeded') {
+            Die ('cota do Google Drive estourada. Espere algumas horas e rode de novo com ' +
+                 '-From Download -- as partes ja conferidas sao mantidas. / Google Drive ' +
+                 'quota exceeded; wait a few hours and re-run with -From Download.')
+        }
+        Die "o download falhou; veja $($script:LogsDir)\download.log"
+    }
     Write-Ok 'pacote baixado e conferido'
 }
 
