@@ -28,14 +28,29 @@ A virtualização precisa estar habilitada na BIOS/UEFI.
 
 ## Início rápido
 
+Comando testado em campo — rode num PowerShell **como Administrador**:
+
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
     -FolderUrl 'https://drive.google.com/drive/folders/SEU_ID_DA_PASTA' `
-    -WlsPassword 'SUA_SENHA_DO_WEBLOGIC'
+    -WlsPassword 'SUA_SENHA_DO_WEBLOGIC' `
+    -TargetDir 'C:\R12OnContainer'
 ```
 
 Isso instala o Git se faltar, clona este repositório em `C:\r12-on-container` e
 dispara o deploy completo. Conte com algumas horas, dominadas pelo download.
+
+Duas lições de execuções reais:
+
+- **O `-TargetDir` precisa apontar para um disco de verdade.** O padrão é
+  `D:\R12OnContainer`; em máquinas onde o `D:` não existe ou é CD-ROM/leitor de
+  cartão, o script agora para na hora e diz isso. Apontar para o `C:` (ou o
+  drive que tiver ~345 GB livres) evita a ida e volta. Liste os discos reais
+  com `Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"`.
+- **A URL raw de `main` fica em cache no CDN por alguns minutos após um push.**
+  Se você acabou de atualizar o repositório, fixe o commit:
+  `https://raw.githubusercontent.com/AleCyriaco/r12-on-container/<sha-do-commit>/bootstrap.ps1`
+  — URL por SHA é imutável e nunca serve versão velha.
 
 Se preferir clonar antes:
 
