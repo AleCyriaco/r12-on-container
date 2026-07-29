@@ -42,7 +42,7 @@ Comando testado em campo — rode num PowerShell **como Administrador**:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
-    -FolderUrl 'https://drive.google.com/drive/folders/SEU_ID_DA_PASTA' `
+    -BaseUrl 'https://pub-SEUHASH.r2.dev' `
     -WlsPassword 'SUA_SENHA_DO_WEBLOGIC' `
     -TargetDir 'C:\R12OnContainer'
 ```
@@ -73,9 +73,7 @@ Copy-Item config.example.psd1 config.psd1   # depois preencha
 
 ## Preparando o pacote
 
-Divide o volume em partes de 5 GB e gera um manifesto com checksums. Depois suba
-tudo para uma pasta do Drive compartilhada como *Qualquer pessoa com o link →
-Leitor*:
+Divide o volume em partes de 5 GB com um manifesto de checksums:
 
 ```powershell
 .\Split-Package.ps1 `
@@ -84,18 +82,39 @@ Leitor*:
     -OutDir     'D:\upload'
 ```
 
-Suba **todo** o conteúdo de `D:\upload`: as partes, a imagem do container e o
+Depois suba **todo** o conteúdo de `D:\upload` — partes, imagem do container e
 `manifest.txt`. É o manifesto que permite ao deploy conferir cada parte por
 tamanho e SHA-256.
 
-Dividir não é sobre armazenamento — 58 GB são 58 GB de qualquer jeito. O que
-você ganha:
+### Onde hospedar
 
-- **Cota de download por arquivo.** O Google limita arquivos públicos
-  individualmente.
-- **Retomada de verdade.** Uma parte ruim de 5 GB custa 5 GB, não 58.
+**Use object storage com HTTP puro.** O Cloudflare R2 custa cerca de
+**US$ 0,72/mês** para 58 GB e **não cobra egress**; o Backblaze B2 é
+equivalente. Suba com o [Upload-ToR2.ps1](Upload-ToR2.ps1) — o painel do
+Cloudflare recusa arquivos acima de ~300 MB, então ele usa rclone e a API S3.
+Depois habilite leitura pública no bucket e passe a URL como `-BaseUrl`.
+
+**Serviços de compartilhamento de arquivo não servem para isso**, e medimos
+o porquê:
+
+| Serviço | Impedimento |
+|---|---|
+| Google Drive | cota de download — após ~56 GB numa janela, devolve uma página HTML *"Quota exceeded"* com HTTP 200 no lugar do arquivo. Ainda exige scraping do HTML para listar pasta. |
+| Proton Drive | criptografia ponta a ponta. O fragmento da URL é a chave; baixar exigiria implementar SRP-6a e a hierarquia de chaves OpenPGP. |
+| file.kiwi | também ponta a ponta — AES-GCM num web worker, chave no fragmento da URL. |
+
+Todos são feitos para humano com navegador, não para script. Object storage com
+URL pública ou assinada é feito exatamente para isto.
+
+### Por que dividir
+
+Não é por armazenamento — 58 GB são 58 GB de qualquer jeito. O ganho é:
+
+- **Integridade granular.** Uma parte de 5 GB corrompida é detectada e
+  rebaixada sozinha.
 - **Reassembly por streaming.** `cat partes | zstd -dc | tar -x` nunca grava os
   58 GB de volta em disco.
+- **Alívio de cota por arquivo**, se você estiver preso a um serviço que impõe uma.
 
 ## Como funciona
 

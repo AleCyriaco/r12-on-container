@@ -42,7 +42,7 @@ Field-tested one-liner — run from an **elevated** PowerShell:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
-    -FolderUrl 'https://drive.google.com/drive/folders/YOUR_FOLDER_ID' `
+    -BaseUrl 'https://pub-YOURHASH.r2.dev' `
     -WlsPassword 'YOUR_WEBLOGIC_PASSWORD' `
     -TargetDir 'C:\R12OnContainer'
 ```
@@ -73,8 +73,7 @@ Copy-Item config.example.psd1 config.psd1   # then fill it in
 
 ## Preparing the package
 
-Split the volume into 5 GB parts and generate a checksum manifest, then upload
-everything to a Drive folder shared as *Anyone with the link → Viewer*:
+Split the volume into 5 GB parts with a checksum manifest:
 
 ```powershell
 .\Split-Package.ps1 `
@@ -83,16 +82,36 @@ everything to a Drive folder shared as *Anyone with the link → Viewer*:
     -OutDir     'D:\upload'
 ```
 
-Upload **all** of `D:\upload`: the parts, the container image, and
-`manifest.txt`. The manifest is what lets the deployment verify each part by
-size and SHA-256.
+Then upload **all** of `D:\upload` — parts, container image and `manifest.txt`.
+The manifest is what lets the deployment verify each part by size and SHA-256.
 
-Splitting is not about storage — 58 GB is 58 GB either way. It buys you:
+### Where to host it
 
-- **Per-file download quota.** Google throttles public files individually.
-- **Real resumability.** A bad 5 GB part costs 5 GB, not 58.
+**Use plain HTTP object storage.** Cloudflare R2 costs about **US$0.72/month**
+for 58 GB and charges **zero egress**; Backblaze B2 is comparable. Upload with
+[Upload-ToR2.ps1](Upload-ToR2.ps1) — the Cloudflare dashboard rejects files
+over ~300 MB, so this uses rclone and the S3 API. Then enable public read on
+the bucket and pass the resulting URL as `-BaseUrl`.
+
+**Consumer file-sharing services do not work for this**, and we measured why:
+
+| Service | Blocker |
+|---|---|
+| Google Drive | download quota — after ~56 GB in one window it serves an HTML *"Quota exceeded"* page with HTTP 200 instead of the file. Also needs HTML scraping to list a folder. |
+| Proton Drive | end-to-end encrypted. The URL fragment is the decryption key; downloading means implementing SRP-6a plus the OpenPGP key hierarchy. |
+| file.kiwi | end-to-end encrypted too — AES-GCM in a web worker, key in the URL fragment. |
+
+They are all built for a human with a browser, not for a script. Object storage
+with signed or public URLs is built for exactly this.
+
+### Why split at all
+
+Not for storage — 58 GB is 58 GB either way. It buys:
+
+- **Granular integrity.** A corrupt 5 GB part is detected and re-fetched alone.
 - **Streaming reassembly.** `cat parts | zstd -dc | tar -x` never writes the
   58 GB back to disk.
+- **Per-file quota relief**, if you are stuck on a service that imposes one.
 
 ## How it works
 
