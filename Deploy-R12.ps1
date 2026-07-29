@@ -235,7 +235,18 @@ function Invoke-Vm {
 
     if ($Detached) {
         $logWsl = ConvertTo-WslPath (Join-Path $script:LogsDir "$Name.log")
-        & podman machine ssh $MachineName "setsid nohup bash $wslPath > $logWsl 2>&1 < /dev/null & echo ok" | Out-Null
+        $rcWsl  = "$logWsl.rc"
+        # Sentinela com o codigo de saida em vez de "o processo ainda existe?".
+        # Checar processo com "pgrep -f <padrao>" NAO funciona aqui: a propria
+        # linha de comando do wrapper ssh contem o padrao, entao o pgrep casa
+        # consigo mesmo e a espera nunca termina. O arquivo .rc so aparece
+        # quando o script realmente acaba -- e ainda diz se deu certo.
+        # A sentinel file with the exit code, not "does the process exist?".
+        # pgrep -f <pattern> matches the ssh wrapper's OWN command line, so the
+        # wait never ends. The .rc file appears only when the script truly
+        # finishes, and tells us whether it succeeded.
+        $cmd = "rm -f $rcWsl; setsid nohup bash -c 'bash $wslPath; echo `$? > $rcWsl' > $logWsl 2>&1 < /dev/null & echo ok"
+        Invoke-Native { & podman machine ssh $MachineName $cmd } | Out-Null
         return
     }
     $out = Invoke-Native { & podman machine ssh $MachineName "bash $wslPath" 2>&1 }
@@ -243,10 +254,13 @@ function Invoke-Vm {
     $out | ForEach-Object { Write-Host "    $_" }
 }
 
-# Acompanha um passo detached ate o processo morrer, ecoando o log.
+# Acompanha um passo detached ate a sentinela .rc aparecer, ecoando o log.
+# Devolve o codigo de saida do script remoto.
 function Wait-VmStep {
     param([string]$Name, [int]$TimeoutMin = 240)
     $logFile  = Join-Path $script:LogsDir "$Name.log"
+    $rcFile   = "$logFile.rc"
+    $rcWsl    = ConvertTo-WslPath $rcFile
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shown    = 0
     while ((Get-Date) -lt $deadline) {
@@ -266,10 +280,22 @@ function Wait-VmStep {
                 $shown = $lines.Count
             }
         }
-        $alive = & podman machine ssh $MachineName "pgrep -f 'bash /mnt/.*/$Name.sh' >/dev/null && echo vivo || echo fim"
-        if ($alive -match 'fim') { return }
+        # A sentinela e gravada pelo shell remoto ao fim do script. Ler pelo
+        # caminho do Windows evita mais uma ida ate a VM a cada 15 segundos.
+        if (Test-Path $rcFile) {
+            $rc = (Get-Content $rcFile -Raw -ErrorAction SilentlyContinue).Trim()
+            Start-Sleep -Seconds 2   # deixa o log terminar de ser gravado
+            if (Test-Path $logFile) {
+                $lines = @(Get-Content $logFile -ErrorAction SilentlyContinue)
+                if ($lines.Count -gt $shown) {
+                    $lines[$shown..($lines.Count-1)] | ForEach-Object { Write-Host "    $_" }
+                }
+            }
+            if ($rc -ne '0') { Write-Warn2 "a fase '$Name' saiu com codigo $rc" }
+            return $rc
+        }
     }
-    Die "tempo esgotado esperando a fase '$Name' (limite de $TimeoutMin min)"
+    Die "tempo esgotado esperando a fase '$Name' (limite de $TimeoutMin min). Veja $logFile"
 }
 
 # ---------------------------------------------------------------- Google Drive
@@ -891,7 +917,7 @@ df -h /var | tail -1
 '@
 
     Invoke-Vm -Name 'download' -Detached -Script $dlTpl.Replace('__LISTA__', ($baixar -join "`n"))
-    Wait-VmStep -Name 'download' -TimeoutMin 720
+    $null = Wait-VmStep -Name 'download' -TimeoutMin 720
 
     $dlLog = Get-Content (Join-Path $script:LogsDir 'download.log') -Raw
     if ($dlLog -notmatch 'download OK') {
@@ -956,7 +982,7 @@ df -h "$MNT" | tail -1
 '@
 
     Invoke-Vm -Name 'extract' -Detached -Script $exTpl.Replace('__EXCL__', $excl)
-    Wait-VmStep -Name 'extract' -TimeoutMin 360
+    $null = Wait-VmStep -Name 'extract' -TimeoutMin 360
 
     $exLog = Get-Content (Join-Path $script:LogsDir 'extract.log') -Raw
     if ($exLog -notmatch 'extracao OK') { Die 'a extracao falhou; veja logs\extract.log' }
@@ -1145,7 +1171,7 @@ echo "[*] services OK"
 
     Invoke-Vm -Name 'services' -Detached -Script `
         $svcTpl.Replace('__WLSPWD__', $WlsPassword).Replace('__APPSPWD__', $AppsPassword).Replace('__APPSHOST__', $AppsHost)
-    Wait-VmStep -Name 'services' -TimeoutMin 90
+    $null = Wait-VmStep -Name 'services' -TimeoutMin 90
     Write-Ok 'servicos iniciados'
 }
 
