@@ -623,6 +623,37 @@ if (Should-Run 'Machine') {
     $vmDir    = Join-Path $TargetDir 'vm'
     $jaExiste = $existing | Where-Object { $_ -replace '\*$','' -eq $MachineName }
 
+    # MAQUINA FANTASMA: registrada no podman e no WSL, mas com o disco virtual
+    # ausente. Acontece quando a pasta da instancia e apagada a mao sem remover
+    # a maquina antes -- o registro do WSL continua apontando para um vhdx que
+    # nao existe mais. O erro que aparece sem esta checagem nao ajuda em nada:
+    #   Failed to attach disk '...\ext4.vhdx' to WSL2: The system cannot find
+    #   the path specified.  Error code: ...MountDisk/HCS/ERROR_PATH_NOT_FOUND
+    # Como o disco ja se foi, nao ha o que preservar: limpamos e recriamos.
+    # GHOST MACHINE: registered in podman and WSL, but its virtual disk is
+    # gone -- typically after deleting the instance folder by hand without
+    # removing the machine first. Nothing is left to preserve, so we clean up
+    # the stale registration and recreate.
+    if ($jaExiste) {
+        $vhdx = Join-Path $vmDir 'ext4.vhdx'
+        $temDisco = Test-Path -LiteralPath $vhdx
+        if (-not $temDisco) {
+            # o disco pode nao ter sido movido para o TargetDir; conferir o
+            # local padrao antes de declarar fantasma
+            $padrao = Join-Path $env:LOCALAPPDATA "containers\podman\machine\wsl\wsldist\$MachineName\ext4.vhdx"
+            $temDisco = Test-Path -LiteralPath $padrao
+        }
+        if (-not $temDisco) {
+            Write-Warn2 "a maquina '$MachineName' esta registrada mas o disco virtual sumiu."
+            Write-Warn2 'registro orfao (a pasta da instancia foi apagada?) -- limpando para recriar.'
+            Invoke-Native { & wsl.exe --unregister "podman-$MachineName" } 2>&1 | Out-Null
+            Invoke-Native { & cmd /c "podman machine rm -f $MachineName >nul 2>&1" }
+            Start-Sleep -Seconds 2
+            $jaExiste = $null
+            Write-Ok 'registro removido; a maquina sera criada do zero'
+        }
+    }
+
     # O WSL limita a VM a ~metade da RAM do host por padrao, ignorando o que o
     # podman pedir. Num host de 16 GB a VM ficaria com 8 GB -- insuficiente ate
     # para a SGA reduzida. Se o padrao do WSL nao comporta o que precisamos,
