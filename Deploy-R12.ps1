@@ -79,7 +79,10 @@ param(
     [string]$FolderUrl,
     [string]$VolumeFileId,
     [string]$ImageFileId,
-    [string]$TargetDir   = 'D:\R12OnContainer',
+    # Sem padrao de propriedade: o drive e escolhido pelo portao de
+    # requisitos, entre os que tem espaco, pelo maior livre.
+    [string]$TargetDir,
+    [string]$PastaInstancia = 'R12OnContainer',
     [string]$MachineName = 'ebs',
     [int]$Cpus           = 0,       # 0 = automatico: min(8, CPUs do host)
     [int]$MemoryMB       = 0,       # 0 = automatico, conforme a RAM do host
@@ -155,28 +158,14 @@ if ($SgaGb -le 0 -and $MemoryMB -lt 38912) {
 
 # ---------------------------------------------------------------- infraestrutura
 
-# Validar o drive do -TargetDir ANTES de qualquer uso do caminho. Sem isso a
-# falha aparece longe da causa: Join-Path morre com "Cannot find drive" se o
-# drive nao existe, e New-Item com "The path is not of a legal form" se o
-# drive existe mas nao esta utilizavel (CD-ROM, leitor de cartao vazio).
-# Validate the -TargetDir drive BEFORE any use of the path. Otherwise the
-# failure surfaces far from the cause: Join-Path dies if the drive is absent,
-# New-Item if it exists but is unusable (CD-ROM, empty card reader).
-$driveRoot = [IO.Path]::GetPathRoot($TargetDir)
-if (-not $driveRoot -or -not (Test-Path -LiteralPath $driveRoot)) {
-    $sugestao = 'C:\' + (Split-Path $TargetDir -Leaf)
-    Write-Host ''
-    Write-Host "ERRO: o drive de '$TargetDir' nao existe ou nao esta acessivel nesta maquina." -ForegroundColor Red
-    Write-Host "      Passe -TargetDir apontando para um drive real, ex.: -TargetDir '$sugestao'" -ForegroundColor Red
-    Write-Host "ERROR: the drive for '$TargetDir' does not exist or is not usable on this machine." -ForegroundColor Red
-    Write-Host "       Pass -TargetDir pointing at a real drive, e.g. -TargetDir '$sugestao'" -ForegroundColor Red
-    # throw, nao "exit": em memoria o exit fecharia a janela do PowerShell
-    throw "drive de '$TargetDir' indisponivel"
-}
-
+# O -TargetDir NAO tem padrao fixo: cada maquina tem um setup de discos
+# diferente, e cravar "D:" quebra em toda maquina que so tem C:. Quando nao
+# informado, o portao de requisitos mais abaixo escolhe o drive com mais
+# espaco livre. ScriptsDir e LogsDir sao derivados la, depois da escolha.
+# -TargetDir has NO fixed default: every machine has a different disk layout,
+# and hardcoding "D:" breaks on any machine with only C:. When omitted, the
+# requirements gate below picks the drive with the most free space.
 $script:PhaseOrder = @('Preflight','Podman','Machine','Download','Extract','Container','Services','Verify')
-$script:ScriptsDir = Join-Path $TargetDir 'scripts'
-$script:LogsDir    = Join-Path $TargetDir 'logs'
 
 function Write-Phase { param([string]$m) Write-Host "`n=== $m ===" -ForegroundColor Cyan }
 function Write-Info  { param([string]$m) Write-Host "    $m" }
@@ -401,10 +390,13 @@ function ConvertFrom-Manifest {
 $modo = 'CONGELADO (sem fs2, sem adop)'
 if ($KeepFs2) { $modo = 'dual filesystem (fs1 + fs2)' }
 
+$destinoTxt = $TargetDir
+if (-not $destinoTxt) { $destinoTxt = '(a escolher: drive com mais espaco livre)' }
+
 Write-Host @"
 
   Deploy Oracle EBS R12.2.12 + LAD Brasil
-  destino : $TargetDir
+  destino : $destinoTxt
   maquina : $MachineName
   modo    : $modo
 
@@ -486,23 +478,29 @@ foreach ($d in $discos) {
 }
 
 if ($servem.Count -eq 0) {
-    $maior = if ($discos) { "$($discos[0].DeviceID) com $($discos[0].LivreGB) GB" } else { 'nenhum disco fixo encontrado' }
+    $maior = if ($discos) { "$($discos[0].DeviceID) com $($discos[0].LivreGB) GB livres" } else { 'nenhum disco fixo encontrado' }
     $falhas.Add("Disco: nenhum drive tem os $REQ_DISK_GB GB necessarios (o maior e $maior)")
-} else {
+}
+elseif (-not $TargetDir) {
+    # Nao informado: adota o drive com mais espaco livre entre os que servem.
+    $TargetDir = $servem[0].DeviceID + '\' + $PastaInstancia
+    Write-Host ("    {0,-18} {1,-22} {2}" -f 'Destino escolhido', $TargetDir,
+        "$($servem[0].LivreGB) GB livres") -ForegroundColor Cyan
+}
+else {
+    # Informado: o drive precisa existir E ter espaco. Nao adianta seguir e
+    # descobrir isso no meio de uma extracao de 274 GB.
     $driveAlvo = $TargetDir.Substring(0,2)
+    $existe    = Test-Path -LiteralPath ([IO.Path]::GetPathRoot($TargetDir))
     $alvoServe = [bool]($servem | Where-Object { $_.DeviceID -eq $driveAlvo })
-    $explicito = $PSBoundParameters.ContainsKey('TargetDir')
-    if (-not $alvoServe) {
-        $melhor = $servem[0].DeviceID
-        $novo   = $melhor + '\' + (Split-Path $TargetDir -Leaf)
-        if ($explicito) {
-            $falhas.Add("Disco: $driveAlvo nao tem os $REQ_DISK_GB GB necessarios. " +
-                        "Use -TargetDir '$novo' ($($servem[0].LivreGB) GB livres)")
-        } else {
-            Write-Host ("    {0,-18} {1}" -f 'Destino ajustado',
-                "$TargetDir -> $novo (mais espaco livre)") -ForegroundColor Yellow
-            $TargetDir = $novo
-        }
+    $sugerido  = $servem[0].DeviceID + '\' + (Split-Path $TargetDir -Leaf)
+    if (-not $existe) {
+        $falhas.Add("Disco: o drive $driveAlvo nao existe nesta maquina. " +
+                    "Use -TargetDir '$sugerido' ($($servem[0].LivreGB) GB livres) ou omita o parametro")
+    } elseif (-not $alvoServe) {
+        $livreAlvo = ($discos | Where-Object { $_.DeviceID -eq $driveAlvo }).LivreGB
+        $falhas.Add("Disco: $driveAlvo tem $livreAlvo GB livres, precisa de $REQ_DISK_GB GB. " +
+                    "Use -TargetDir '$sugerido' ($($servem[0].LivreGB) GB livres) ou omita o parametro")
     }
 }
 

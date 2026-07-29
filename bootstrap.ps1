@@ -55,7 +55,11 @@ param(
     [string]$WlsPassword = 'welcome1',
     [string]$AppsPassword,
     [string]$CheckoutDir = 'C:\r12-on-container',
-    [string]$TargetDir   = 'D:\R12OnContainer',
+    # Sem padrao: cada maquina tem um setup de discos diferente. Omitido, o
+    # Deploy-R12.ps1 escolhe o drive com mais espaco livre.
+    # No default: every machine has a different disk layout. When omitted,
+    # Deploy-R12.ps1 picks the drive with the most free space.
+    [string]$TargetDir,
     [string]$MachineName = 'ebs',
     [string]$RepoUrl     = 'https://github.com/AleCyriaco/r12-on-container.git',
     [string]$Ref         = 'main',
@@ -155,11 +159,13 @@ Write-Step 'Deploy'
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch { }
 
 $argumentos = @{
-    TargetDir   = $TargetDir
     MachineName = $MachineName
     From        = $From
     ConfigFile  = $cfgFile      # sempre explicito: aqui nao ha $PSScriptRoot
 }
+# So repassa o TargetDir se foi realmente informado: passar vazio faria o
+# Deploy-R12.ps1 pensar que houve escolha explicita e pular a selecao de disco.
+if ($TargetDir)    { $argumentos.TargetDir    = $TargetDir }
 if ($BaseUrl)      { $argumentos.BaseUrl      = $BaseUrl }
 if ($FolderUrl)    { $argumentos.FolderUrl    = $FolderUrl }
 if ($WlsPassword)  { $argumentos.WlsPassword  = $WlsPassword }

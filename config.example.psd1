@@ -33,6 +33,11 @@
     # Hostname que o EBS gravou no contexto / hostname baked into the EBS context
     AppsHost     = 'apps.example.com'
 
-    # Onde instalar / where to install
-    TargetDir    = 'D:\R12OnContainer'
+    # Onde instalar. Deixe COMENTADO para o script escolher sozinho o drive
+    # com mais espaco livre -- cada maquina tem um setup de discos diferente,
+    # e cravar uma letra aqui quebra em toda maquina que nao a tenha.
+    # Where to install. Leave COMMENTED OUT to let the script pick the drive
+    # with the most free space; hardcoding a letter breaks on machines
+    # that do not have it.
+    # TargetDir  = 'C:\R12OnContainer'
 }
