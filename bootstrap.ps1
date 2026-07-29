@@ -24,9 +24,14 @@
       No credentials are embedded. The WebLogic password is passed as a
       parameter or read from a config.psd1 you create after cloning.
 
+.PARAMETER BaseUrl
+    RECOMENDADO. URL base de um bucket/host HTTP com as partes e o
+    manifest.txt (Cloudflare R2, S3, qualquer servidor com Range).
+    RECOMMENDED. Base URL of an HTTP bucket/host with the parts and manifest.
+
 .PARAMETER FolderUrl
-    Pasta publica do Drive com as partes e o manifest.txt.
-    Public Drive folder holding the parts and manifest.txt.
+    Alternativa: pasta publica do Drive. Sujeita a cota de download.
+    Alternative: public Drive folder. Subject to download quota.
 
 .PARAMETER WlsPassword
     Senha do WebLogic. Sem ela o AdminServer nao sobe.
@@ -44,6 +49,7 @@
 
 [CmdletBinding()]
 param(
+    [string]$BaseUrl,
     [string]$FolderUrl,
     [string]$WlsPassword,
     [string]$AppsPassword,
@@ -159,6 +165,7 @@ $argumentos = @{
     From        = $From
     ConfigFile  = $cfgFile      # sempre explicito: aqui nao ha $PSScriptRoot
 }
+if ($BaseUrl)      { $argumentos.BaseUrl      = $BaseUrl }
 if ($FolderUrl)    { $argumentos.FolderUrl    = $FolderUrl }
 if ($WlsPassword)  { $argumentos.WlsPassword  = $WlsPassword }
 if ($AppsPassword) { $argumentos.AppsPassword = $AppsPassword }
