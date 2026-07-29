@@ -979,9 +979,19 @@ mkdir -p "$MNT"
 # SAFETY INTERLOCK: never extract over an existing instance. A deploy launched
 # with the default -MachineName, on a host where that name was already a live
 # instance, started extracting over /u01 with the database OPEN.
-if [ -d "$MNT/install/APPS" ]; then
+# A trava so vale para uma instancia COMPLETA, marcada pela sentinela abaixo.
+# Uma extracao interrompida (VM parada no meio, queda de energia) deixa
+# install/APPS existindo pela metade -- barrar isso obrigaria o usuario a
+# limpar na mao para retomar, e a diferenca entre "instancia viva" e "sobra de
+# extracao morta" e exatamente o que a sentinela distingue.
+# The interlock only applies to a COMPLETE instance, marked by the sentinel
+# below. An interrupted extraction leaves install/APPS half-written; blocking
+# that would force manual cleanup to resume.
+COMPLETA="$MNT/.deploy-complete"
+if [ -d "$MNT/install/APPS" ] && [ -f "$COMPLETA" ]; then
   echo ""
-  echo "ERRO: ja existe uma instancia EBS em $MNT/install/APPS"
+  echo "ERRO: ja existe uma instancia EBS COMPLETA em $MNT/install/APPS"
+  echo "      (implantada em $(cat "$COMPLETA" 2>/dev/null))"
   echo ""
   echo "  Extrair por cima destroi a instancia existente -- e se o banco"
   echo "  estiver no ar, corrompe os datafiles em uso."
@@ -991,9 +1001,9 @@ if [ -d "$MNT/install/APPS" ]; then
   echo ""
   echo "  Se voce QUER MESMO substituir esta, pare tudo e limpe antes:"
   echo "      podman stop <container>"
-  echo "      rm -rf $MNT/install"
+  echo "      rm -rf $MNT/install $COMPLETA"
   echo ""
-  echo "ERROR: an EBS instance already exists at $MNT/install/APPS."
+  echo "ERROR: a COMPLETE EBS instance already exists at $MNT/install/APPS."
   echo "  Extracting over it destroys that instance and, if the database is"
   echo "  running, corrupts datafiles in use. Use a different -MachineName and"
   echo "  -TargetDir, or stop everything and remove $MNT/install first."
@@ -1011,6 +1021,14 @@ touch "$MNT/.probe"; INO=$(stat -c %i "$MNT/.probe"); rm -f "$MNT/.probe"
 echo "    $INO (limite 4294967295)"
 [ "$INO" -lt 4294967295 ] || { echo "ERRO: inode acima do limite de 32 bits"; exit 1; }
 
+# Sobra de uma extracao anterior interrompida: limpar antes, porque extrair
+# por cima de arquivos parciais mistura duas copias e o resultado nao presta.
+if [ -d "$MNT/install" ]; then
+  echo "[*] restos de uma extracao anterior incompleta -- removendo antes"
+  rm -rf "$MNT/install"
+fi
+rm -f "$MNT/.deploy-complete"
+
 echo "[*] extraindo -- demora"
 date +'    inicio: %H:%M:%S'
 # Com partes, reassembla por STREAMING: o cat alimenta o zstd direto, sem nunca
@@ -1026,6 +1044,11 @@ date +'    fim: %H:%M:%S'
 
 [ -d "$MNT/install/APPS" ] || { echo "ERRO: extracao nao produziu install/APPS"; exit 1; }
 chown -R 54321:54321 "$MNT/install" 2>/dev/null || true
+
+# Sentinela: so agora existe uma instancia COMPLETA aqui. E ela que a trava do
+# inicio consulta -- sem isso, uma extracao interrompida seria confundida com
+# uma instancia viva e exigiria limpeza manual para retomar.
+date +'%Y-%m-%d %H:%M:%S' > "$MNT/.deploy-complete"
 
 echo "[*] filesystems presentes"
 ls -d "$MNT"/install/APPS/fs* 2>/dev/null
