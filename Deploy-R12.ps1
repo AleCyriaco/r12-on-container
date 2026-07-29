@@ -488,6 +488,26 @@ if (Should-Run 'Preflight') {
         Die 'hypervisor inativo -- reinicie o Windows e rode o mesmo comando de novo'
     }
 
+    # A maquina alvo ja existe? Avisar ANTES de qualquer coisa comecar.
+    # O -MachineName tem padrao 'ebs': numa maquina onde esse nome ja e uma
+    # instancia em producao, seguir adiante significa extrair por cima dela.
+    # Warn BEFORE anything starts if the target machine already exists: with
+    # the default -MachineName, continuing means extracting over a live
+    # instance.
+    $jaTem = @(Invoke-Native { & podman machine list --format '{{.Name}}' 2>$null }) |
+             Where-Object { ($_ -replace '\*$','') -eq $MachineName }
+    if ($jaTem -and $From -eq 'All') {
+        Write-Host ''
+        Write-Host "  ATENCAO: a maquina podman '$MachineName' JA EXISTE nesta maquina." -ForegroundColor Yellow
+        Write-Host '  Se ela tiver uma instancia EBS, a fase Extract vai recusar sobrescrever' -ForegroundColor Yellow
+        Write-Host '  (e uma trava proposital). Para uma instancia NOVA em paralelo, use:' -ForegroundColor Yellow
+        Write-Host "      -MachineName <outro nome>  -TargetDir <outro caminho>" -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host "  WARNING: podman machine '$MachineName' ALREADY EXISTS here." -ForegroundColor Yellow
+        Write-Host '  For a separate instance, pass a different -MachineName and -TargetDir.' -ForegroundColor Yellow
+        Write-Host ''
+    }
+
     $wslOk = $false
     try { & wsl --status 2>&1 | Out-Null; $wslOk = ($LASTEXITCODE -eq 0) } catch { $wslOk = $false }
     if (-not $wslOk) {
@@ -947,6 +967,39 @@ set -uo pipefail
 PKG=/var/ebs-pkg
 MNT=/var/ebs-u01
 mkdir -p "$MNT"
+
+# TRAVA DE SEGURANCA: nunca extrair por cima de uma instancia existente.
+#
+# Aprendido do jeito ruim: um deploy disparado com o -MachineName no padrao,
+# numa maquina onde esse nome ja era uma instancia em producao, comecou a
+# extrair sobre o /u01 com o banco ABERTO. Datafiles de SYSTEM, SYSAUX, UNDO e
+# TX_DATA foram sobrescritos sob os pes do Oracle. O tar nao tem como saber
+# que aquilo era um banco vivo -- essa checagem tem.
+#
+# SAFETY INTERLOCK: never extract over an existing instance. A deploy launched
+# with the default -MachineName, on a host where that name was already a live
+# instance, started extracting over /u01 with the database OPEN.
+if [ -d "$MNT/install/APPS" ]; then
+  echo ""
+  echo "ERRO: ja existe uma instancia EBS em $MNT/install/APPS"
+  echo ""
+  echo "  Extrair por cima destroi a instancia existente -- e se o banco"
+  echo "  estiver no ar, corrompe os datafiles em uso."
+  echo ""
+  echo "  Se voce QUER outra instancia nesta maquina, use nomes distintos:"
+  echo "      -MachineName <outro>  -TargetDir <outro caminho>"
+  echo ""
+  echo "  Se voce QUER MESMO substituir esta, pare tudo e limpe antes:"
+  echo "      podman stop <container>"
+  echo "      rm -rf $MNT/install"
+  echo ""
+  echo "ERROR: an EBS instance already exists at $MNT/install/APPS."
+  echo "  Extracting over it destroys that instance and, if the database is"
+  echo "  running, corrupts datafiles in use. Use a different -MachineName and"
+  echo "  -TargetDir, or stop everything and remove $MNT/install first."
+  echo ""
+  exit 1
+fi
 
 # As ferramentas AD (adop, adadmin, frmcmp_batch, sqlplus do home 10.1.2) sao
 # ELF de 32 bits: inode acima de 2^32 estoura o stat() delas com EOVERFLOW e o
