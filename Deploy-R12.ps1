@@ -16,8 +16,17 @@
       Services   sobe banco, listener e a pilha WebLogic
       Verify     confere HTTP 302/200, ICM e conteudo do banco
 
+.PARAMETER BaseUrl
+    RECOMENDADO. URL base de um bucket/host HTTP com as partes e o
+    manifest.txt -- Cloudflare R2, S3, ou qualquer servidor com suporte a
+    Range. Ex: https://pub-abc123.r2.dev
+    Sem cota, sem scraping, retomada byte-exata via curl -C -.
+
 .PARAMETER FolderUrl
-    Link da pasta publica do Google Drive com as partes e o manifest.txt.
+    Alternativa: pasta publica do Google Drive com as partes e o manifest.txt.
+    Funciona, mas depende de scraping do HTML e a cota de download do Drive
+    interrompe transferencias grandes -- medido em campo: ~56 GB numa janela
+    curta ja basta para o Drive comecar a devolver pagina de erro.
     Ex: https://drive.google.com/drive/folders/1AbC...
 
 .PARAMETER VolumeFileId
@@ -66,6 +75,7 @@
 
 [CmdletBinding()]
 param(
+    [string]$BaseUrl,
     [string]$FolderUrl,
     [string]$VolumeFileId,
     [string]$ImageFileId,
@@ -108,6 +118,7 @@ if (Test-Path $ConfigFile) {
     $cfg = Import-PowerShellDataFile -Path $ConfigFile
     if (-not $WlsPassword  -and $cfg.WlsPassword)  { $WlsPassword  = $cfg.WlsPassword }
     if (-not $AppsPassword -and $cfg.AppsPassword) { $AppsPassword = $cfg.AppsPassword }
+    if (-not $PSBoundParameters.ContainsKey('BaseUrl')   -and $cfg.BaseUrl)   { $BaseUrl   = $cfg.BaseUrl }
     if (-not $PSBoundParameters.ContainsKey('FolderUrl') -and $cfg.FolderUrl) { $FolderUrl = $cfg.FolderUrl }
     if (-not $PSBoundParameters.ContainsKey('AppsHost')  -and $cfg.AppsHost)  { $AppsHost  = $cfg.AppsHost }
     if (-not $PSBoundParameters.ContainsKey('TargetDir') -and $cfg.TargetDir) { $TargetDir = $cfg.TargetDir }
@@ -311,6 +322,15 @@ function Get-GDriveFolderFiles {
     Write-Info 'arquivos encontrados:'
     $files | ForEach-Object { Write-Info "  - $($_.Name)" }
     return $files
+}
+
+# Baixa um texto pequeno por HTTP (o manifesto num bucket/host qualquer).
+function Get-HttpText {
+    param([Parameter(Mandatory)][string]$Url)
+    $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60
+    # servidores costumam servir .txt como octet-stream; ai o PS 5.1 devolve byte[]
+    if ($r.Content -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($r.Content) }
+    return [string]$r.Content
 }
 
 # Arquivos pequenos (o manifesto) nao passam pelo interstitial de virus.
@@ -647,9 +667,44 @@ if (Should-Run 'Download') {
     Write-Phase 'Download'
 
     # lista "id nome bytes sha256" do que baixar
+    # (com -BaseUrl o "id" e a URL completa; com Drive, o file id)
     $baixar = New-Object Collections.Generic.List[string]
 
-    if ($VolumeFileId -and $ImageFileId) {
+    if ($BaseUrl) {
+        # ---- HTTP simples (Cloudflare R2, S3, qualquer host com Range) ----
+        # Muito melhor que o Drive: sem cota, sem scraping de HTML, sem
+        # interstitial de virus, e a retomada do curl -C - e byte-exata.
+        $raiz = $BaseUrl.TrimEnd('/')
+        Write-Info "origem HTTP: $raiz"
+
+        $man = @{}
+        try {
+            $man = ConvertFrom-Manifest -Text (Get-HttpText "$raiz/manifest.txt")
+            Write-Ok "manifesto lido: $($man.Count) entradas"
+        } catch {
+            Write-Warn2 'sem manifest.txt acessivel: nao havera conferencia de SHA-256'
+        }
+
+        if ($man.Count -gt 0) {
+            $extra = @($man.Values | Where-Object { $_.Kind -eq 'EXTRA' })
+            $parts = @($man.Values | Where-Object { $_.Kind -eq 'PART' } | Sort-Object Name)
+            foreach ($e in $extra) { $baixar.Add("$raiz/$($e.Name) $($e.Name) $($e.Size) $($e.Sha)") }
+            if ($parts.Count -gt 0) {
+                Write-Info "volume: $($parts.Count) partes"
+                foreach ($p in $parts) { $baixar.Add("$raiz/$($p.Name) $($p.Name) $($p.Size) $($p.Sha)") }
+            } else {
+                $f = @($man.Values | Where-Object { $_.Kind -eq 'FILE' })[0]
+                if (-not $f) { Die 'manifesto sem PART nem FILE' }
+                $baixar.Add("$raiz/$($f.Name) $($f.Name) $($f.Size) $($f.Sha)")
+                Write-Info "volume: $($f.Name) (arquivo unico)"
+            }
+        } else {
+            # sem manifesto: nomes padrao do pacote, conferencia so pelo magic
+            $baixar.Add("$raiz/ebs-image-ol7-cll-ok.tar.zst ebs-image-ol7-cll-ok.tar.zst 0 -")
+            $baixar.Add("$raiz/u01-r12-lad-brasil.tar.zst u01-r12-lad-brasil.tar.zst 0 -")
+        }
+    }
+    elseif ($VolumeFileId -and $ImageFileId) {
         $baixar.Add("$ImageFileId ebs-image.tar.zst 0 -")
         $baixar.Add("$VolumeFileId u01.tar.zst 0 -")
         Write-Warn2 'IDs passados na mao: sem manifesto, a conferencia fica so no magic number'
@@ -762,7 +817,21 @@ baixa() {
     fi
 
     echo "    $NAME: baixando (tentativa $tent)"
-    gdrive_get "$ID" "$OUT"
+    case "$ID" in
+      http://*|https://*)
+        # HTTP direto: -C - retoma byte-exato de onde parou, sem cota nem
+        # interstitial. E o caminho bom; o do Drive abaixo e o contorno.
+        curl -sS -L -C - --retry 5 --retry-delay 10 --retry-all-errors \
+             -o "$OUT" "$ID" &
+        CPID=$!
+        while kill -0 $CPID 2>/dev/null; do
+          sleep 60
+          kill -0 $CPID 2>/dev/null && echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $NAME"
+        done
+        wait $CPID
+        ;;
+      *) gdrive_get "$ID" "$OUT" ;;
+    esac
 
     if [ "$SIZE" != "0" ]; then
       atual=$(stat -c %s "$OUT" 2>/dev/null || echo 0)

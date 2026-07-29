@@ -11,9 +11,18 @@
 # the automation -- no credentials, no links to the data.
 
 @{
-    # Link da pasta publica do Google Drive com as partes + manifest.txt
-    # Public Google Drive folder holding the parts + manifest.txt
-    FolderUrl    = 'https://drive.google.com/drive/folders/COLOQUE_O_ID_AQUI'
+    # RECOMENDADO: URL base de um bucket/host HTTP com as partes e o
+    # manifest.txt (Cloudflare R2, S3, qualquer servidor com suporte a Range).
+    # Sem cota, sem scraping, e o curl -C - retoma byte-exato.
+    # RECOMMENDED: base URL of an HTTP bucket/host holding the parts and
+    # manifest.txt. No quota, no scraping, byte-exact resume.
+    BaseUrl      = 'https://pub-SEU_HASH.r2.dev'
+
+    # Alternativa: pasta publica do Google Drive. Funciona, mas depende de
+    # scraping do HTML e a cota de download interrompe transferencias grandes.
+    # Alternative: public Google Drive folder. Works, but relies on HTML
+    # scraping and the download quota interrupts large transfers.
+    # FolderUrl  = 'https://drive.google.com/drive/folders/COLOQUE_O_ID_AQUI'
 
     # Senha do WebLogic (obrigatoria) / WebLogic password (required)
     WlsPassword  = ''
