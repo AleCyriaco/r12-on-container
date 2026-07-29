@@ -1299,7 +1299,23 @@ df -h /var/ebs-u01 | tail -1
     }
     Remove-Item $lixo -ErrorAction SilentlyContinue
 
+    # Painel local com credenciais e atalhos. Gerado aqui, nunca commitado:
+    # carrega todas as senhas em texto puro e este repositorio e publico.
+    Write-Host "`n-- painel local --" -ForegroundColor Cyan
+    $gerador = Join-Path $PSScriptRoot 'New-Painel.ps1'
+    if (-not (Test-Path $gerador)) { $gerador = Join-Path (Get-Location).Path 'New-Painel.ps1' }
+    if (Test-Path $gerador) {
+        try {
+            & $gerador -TargetDir $TargetDir -MachineName $MachineName -AppsHost $AppsHost `
+                       -WlsPassword $WlsPassword -AppsPassword $AppsPassword
+        } catch {
+            Write-Warn2 "nao consegui gerar o painel: $($_.Exception.Message)"
+        }
+    }
+
     Write-Host @"
+
+  Painel: $TargetDir\painel.html  (abra no navegador)
 
   Esperado: AppsLogin 302, frmservlet 200
 
