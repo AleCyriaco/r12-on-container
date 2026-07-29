@@ -84,7 +84,11 @@ param(
     [int]$Cpus           = 0,       # 0 = automatico: min(8, CPUs do host)
     [int]$MemoryMB       = 0,       # 0 = automatico, conforme a RAM do host
     [int]$DiskGB         = 600,
-    [string]$WlsPassword,
+    # Padrao do pacote de referencia (consta no README dele). Nao e segredo
+    # de producao: e a senha de fabrica da instancia empacotada. Sobrescreva
+    # com -WlsPassword ou pelo config.psd1 se a sua for outra.
+    # Default from the reference package (documented in its own README).
+    [string]$WlsPassword = 'welcome1',
     [string]$AppsPassword,
     [string]$ConfigFile,
     [string]$AppsHost    = 'apps.example.com',
@@ -406,86 +410,149 @@ Write-Host @"
 
 "@ -ForegroundColor White
 
+# ======================================================================
+#  PORTAO DE REQUISITOS -- roda ANTES de criar diretorio, baixar ou
+#  instalar qualquer coisa. Se a maquina nao atende, nada e alterado.
+#
+#  Existe porque as falhas por requisito apareciam tarde e disfarcadas:
+#  RAM insuficiente so estourava no "podman machine init"; virtualizacao
+#  desligada so no import do WSL, com HCS_E_HYPERV_NOT_INSTALLED; e disco
+#  cheio, pior ainda, no meio de uma extracao de 274 GB.
+#
+#  REQUIREMENTS GATE -- runs BEFORE creating directories, downloading or
+#  installing anything. If the machine does not qualify, nothing changes.
+# ======================================================================
+$REQ_RAM_GB  = 16
+$REQ_DISK_GB = 345
+if ($KeepFs2) { $REQ_DISK_GB = 380 }
+
+Write-Phase 'Requisitos / Requirements'
+
+$falhas = New-Object Collections.Generic.List[string]
+$cs     = Get-CimInstance Win32_ComputerSystem
+$ramGb  = [math]::Round($cs.TotalPhysicalMemory/1GB, 1)
+
+# --- RAM ---------------------------------------------------------------
+# O Windows reporta um pouco menos que o nominal (16 GB viram ~15.9), por
+# isso a comparacao usa uma margem em vez do valor cheio.
+$ramOk = ($ramGb -ge ($REQ_RAM_GB - 0.7))
+Write-Host ("    {0,-18} {1,-22} {2}" -f 'RAM',
+    "$ramGb GB", $(if ($ramOk) { 'OK' } else { "FALHOU (minimo $REQ_RAM_GB GB)" })) `
+    -ForegroundColor $(if ($ramOk) { 'Green' } else { 'Red' })
+if (-not $ramOk) { $falhas.Add("RAM: $ramGb GB -- o minimo e $REQ_RAM_GB GB") }
+
+# --- Virtualizacao -----------------------------------------------------
+# HypervisorPresent=true e o sinal mais confiavel: significa que ha um
+# hypervisor REALMENTE rodando. VirtualizationFirmwareEnabled=false prova
+# o contrario -- VT-x/AMD-V desligado na BIOS.
+$cpu       = Get-CimInstance Win32_Processor | Select-Object -First 1
+$vtOk      = [bool]$cs.HypervisorPresent
+$vtMotivo  = ''
+if (-not $vtOk) {
+    if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
+        $vtMotivo = 'VT-x/AMD-V desligado no firmware'
+    } else {
+        $vmpEstado = $null
+        try { $vmpEstado = (Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Stop).State } catch { }
+        if ($vmpEstado -eq 'Disabled') {
+            $vtMotivo = 'componente "Virtual Machine Platform" desabilitado'
+        } elseif ($vmpEstado -eq 'Enabled') {
+            $vtMotivo = 'componente habilitado mas hypervisor parado -- falta REINICIAR o Windows'
+        } else {
+            $vtMotivo = 'hypervisor nao esta rodando'
+        }
+    }
+}
+Write-Host ("    {0,-18} {1,-22} {2}" -f 'Virtualizacao',
+    $(if ($vtOk) { 'ativa' } else { 'inativa' }),
+    $(if ($vtOk) { 'OK' } else { "FALHOU ($vtMotivo)" })) `
+    -ForegroundColor $(if ($vtOk) { 'Green' } else { 'Red' })
+if (-not $vtOk) { $falhas.Add("Virtualizacao: $vtMotivo") }
+
+# --- Disco -------------------------------------------------------------
+# Le todos os discos fixos e escolhe. Se o -TargetDir nao foi informado
+# explicitamente, adota o drive com MAIS espaco livre entre os que servem.
+$discos = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
+            Select-Object DeviceID, @{n='LivreGB';e={[math]::Round($_.FreeSpace/1GB,1)}} |
+            Sort-Object LivreGB -Descending)
+$servem = @($discos | Where-Object { $_.LivreGB -ge $REQ_DISK_GB })
+
+foreach ($d in $discos) {
+    $bom = ($d.LivreGB -ge $REQ_DISK_GB)
+    Write-Host ("    {0,-18} {1,-22} {2}" -f "Disco $($d.DeviceID)",
+        "$($d.LivreGB) GB livres",
+        $(if ($bom) { 'OK' } else { "insuficiente (precisa $REQ_DISK_GB GB)" })) `
+        -ForegroundColor $(if ($bom) { 'Green' } else { 'DarkGray' })
+}
+
+if ($servem.Count -eq 0) {
+    $maior = if ($discos) { "$($discos[0].DeviceID) com $($discos[0].LivreGB) GB" } else { 'nenhum disco fixo encontrado' }
+    $falhas.Add("Disco: nenhum drive tem os $REQ_DISK_GB GB necessarios (o maior e $maior)")
+} else {
+    $driveAlvo = $TargetDir.Substring(0,2)
+    $alvoServe = [bool]($servem | Where-Object { $_.DeviceID -eq $driveAlvo })
+    $explicito = $PSBoundParameters.ContainsKey('TargetDir')
+    if (-not $alvoServe) {
+        $melhor = $servem[0].DeviceID
+        $novo   = $melhor + '\' + (Split-Path $TargetDir -Leaf)
+        if ($explicito) {
+            $falhas.Add("Disco: $driveAlvo nao tem os $REQ_DISK_GB GB necessarios. " +
+                        "Use -TargetDir '$novo' ($($servem[0].LivreGB) GB livres)")
+        } else {
+            Write-Host ("    {0,-18} {1}" -f 'Destino ajustado',
+                "$TargetDir -> $novo (mais espaco livre)") -ForegroundColor Yellow
+            $TargetDir = $novo
+        }
+    }
+}
+
+# --- Veredito ----------------------------------------------------------
+if ($falhas.Count -gt 0) {
+    Write-Host ''
+    Write-Host '  ================================================================' -ForegroundColor Red
+    Write-Host '   ESTA MAQUINA NAO ATENDE AOS REQUISITOS MINIMOS' -ForegroundColor Red
+    Write-Host '   THIS MACHINE DOES NOT MEET THE MINIMUM REQUIREMENTS' -ForegroundColor Red
+    Write-Host '  ================================================================' -ForegroundColor Red
+    Write-Host ''
+    foreach ($f in $falhas) { Write-Host "   - $f" -ForegroundColor Red }
+    Write-Host ''
+    Write-Host '   Requisitos minimos / Minimum requirements:' -ForegroundColor Yellow
+    Write-Host "     RAM            $REQ_RAM_GB GB  (48 GB recomendado para a SGA de 20 GB do pacote)"
+    Write-Host "     Disco livre    $REQ_DISK_GB GB  (274 GB extraidos + 59 GB do pacote)"
+    Write-Host '     Virtualizacao  VT-x / AMD-V ativo na BIOS/UEFI, com o componente'
+    Write-Host '                    "Virtual Machine Platform" habilitado no Windows'
+    Write-Host '                    (wsl --install --no-distribution, como Administrador,'
+    Write-Host '                     seguido de REINICIO)'
+    Write-Host '                    Se este Windows for uma VM: habilite virtualizacao'
+    Write-Host '                    aninhada no hypervisor que a hospeda.'
+    Write-Host ''
+    Write-Host '   Instalacao interrompida. NADA foi alterado nesta maquina.' -ForegroundColor Yellow
+    Write-Host '   Installation aborted. NOTHING was changed on this machine.' -ForegroundColor Yellow
+    Write-Host ''
+    throw 'requisitos minimos nao atendidos'
+}
+
+Write-Ok 'todos os requisitos atendidos'
+
+# Os caminhos derivam do TargetDir, que pode ter sido ajustado acima.
+$script:ScriptsDir = Join-Path $TargetDir 'scripts'
+$script:LogsDir    = Join-Path $TargetDir 'logs'
 New-Item -ItemType Directory -Force -Path $TargetDir, $script:ScriptsDir, $script:LogsDir | Out-Null
 
 # ------------------------------------------------------------------- Preflight
 if (Should-Run 'Preflight') {
     Write-Phase 'Preflight'
 
-    $cs     = Get-CimInstance Win32_ComputerSystem
-    $ramGb  = [math]::Round($cs.TotalPhysicalMemory/1GB, 1)
-    $drive  = $TargetDir.Substring(0,2)
-    $disk   = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'"
-    $freeGb = [math]::Round($disk.FreeSpace/1GB, 1)
-    $needGb = 345
-    if ($KeepFs2) { $needGb = 380 }
-
-    Write-Info "RAM fisica    : $ramGb GB"
+    # RAM, disco e virtualizacao ja foram barrados no portao de requisitos
+    # la em cima. Aqui ficam so o plano de dimensionamento e o que nao
+    # impede a instalacao.
     Write-Info "CPUs logicas  : $($cs.NumberOfLogicalProcessors)"
-    Write-Info "livre em $drive    : $freeGb GB  (necessario ~$needGb GB)"
     Write-Info ("plano         : VM {0:N0} MB, {1} CPUs{2}" -f $MemoryMB, $Cpus,
         $(if ($SgaGb -gt 0) { ", SGA reduzida para ${SgaGb}G" } else { ', SGA 20G do pacote' }))
 
-    if ($freeGb -lt $needGb) { Die "espaco insuficiente em $drive" }
-
-    # Minimo absoluto: 16 GB de RAM no host (15 medidos -- o Windows sempre
-    # reporta um pouco menos que o nominal).
-    if ($ramGb -lt 15) {
-        Die ("RAM insuficiente: $ramGb GB. O minimo e 16 GB -- e mesmo com 16 GB " +
-             'a instancia sobe com SGA reduzida e desempenho limitado.')
-    }
     if ($ramGb -lt 23) {
         Write-Warn2 "host com $ramGb GB: a VM fica com ~$([math]::Round($MemoryMB/1024)) GB e a SGA cai para ${SgaGb}G."
         Write-Warn2 'vai subir, mas espere swap e lentidao -- 48 GB e o recomendado.'
-    }
-
-    # Virtualizacao de verdade, em camadas. "wsl --status" sai com 0 mesmo sem
-    # o Virtual Machine Platform, e HypervisorPresent=true nao garante nada
-    # quando o proprio Windows roda dentro de uma VM sem virtualizacao
-    # aninhada. Encontrado em campo: preflight limpo e o init morrendo depois
-    # com HCS_E_HYPERV_NOT_INSTALLED.
-    # Real virtualisation checks, layered. "wsl --status" exits 0 even without
-    # the Virtual Machine Platform, and HypervisorPresent=true proves nothing
-    # when Windows itself runs inside a VM without nested virtualisation.
-    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-    if (-not $cs.HypervisorPresent -and $cpu.VirtualizationFirmwareEnabled -eq $false) {
-        Die ('a virtualizacao esta DESLIGADA no firmware (VT-x / AMD-V). Isso nao liga por ' +
-             'software: habilite na BIOS/UEFI e rode de novo. Se esta maquina for ela mesma ' +
-             'uma VM, habilite a virtualizacao aninhada no hypervisor dela.')
-    }
-    $vmp = $null
-    try { $vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Stop } catch { }
-    if ($vmp -and $vmp.State -ne 'Enabled') {
-        if (Test-Admin) {
-            Write-Info 'habilitando o Virtual Machine Platform'
-            & wsl.exe --install --no-distribution
-            Write-Warn2 'REINICIE o Windows e rode o mesmo comando de novo.'
-            Die 'reinicio necessario para concluir a habilitacao da virtualizacao'
-        }
-        Die ('o componente "Virtual Machine Platform" esta desabilitado e habilita-lo exige ' +
-             'Administrador. Num PowerShell elevado: wsl.exe --install --no-distribution ' +
-             'e depois REINICIE o Windows.')
-    }
-    if (-not $vmp -and -not (Test-Admin)) {
-        Write-Warn2 'sem Administrador nao da para conferir o Virtual Machine Platform.'
-        Write-Warn2 'se o init falhar com HCS_E_HYPERV_NOT_INSTALLED: PowerShell elevado ->'
-        Write-Warn2 '  wsl.exe --install --no-distribution  e REINICIE; persistindo, e BIOS/virtualizacao aninhada.'
-    }
-    # O caso classico do "instalei mas nao reiniciei": o componente ja le
-    # Enabled, mas o hypervisor so e ativado no proximo boot. Sem esta barreira
-    # o deploy segue e morre no init com HCS_E_HYPERV_NOT_INSTALLED de novo.
-    # The classic "installed but did not reboot": the feature already reads
-    # Enabled, but the hypervisor only launches on the next boot.
-    if ($vmp -and $vmp.State -eq 'Enabled' -and -not $cs.HypervisorPresent) {
-        Write-Host ''
-        Write-Host 'O Virtual Machine Platform esta habilitado, mas o hypervisor NAO esta rodando.' -ForegroundColor Yellow
-        Write-Host 'Quase sempre isso significa uma coisa: falta REINICIAR o Windows.' -ForegroundColor Yellow
-        Write-Host 'Se ja reiniciou e continua aqui: maquina fisica -> VT-x/AMD-V na BIOS;' -ForegroundColor Yellow
-        Write-Host 'maquina virtual -> virtualizacao aninhada no hypervisor dela.' -ForegroundColor Yellow
-        Write-Host '---' -ForegroundColor Yellow
-        Write-Host 'Virtual Machine Platform is enabled but the hypervisor is NOT running.' -ForegroundColor Yellow
-        Write-Host 'Almost always this means one thing: REBOOT Windows.' -ForegroundColor Yellow
-        Die 'hypervisor inativo -- reinicie o Windows e rode o mesmo comando de novo'
     }
 
     # A maquina alvo ja existe? Avisar ANTES de qualquer coisa comecar.

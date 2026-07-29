@@ -51,7 +51,8 @@
 param(
     [string]$BaseUrl,
     [string]$FolderUrl,
-    [string]$WlsPassword,
+    # Padrao do pacote de referencia; sobrescreva se a sua instancia usa outra.
+    [string]$WlsPassword = 'welcome1',
     [string]$AppsPassword,
     [string]$CheckoutDir = 'C:\r12-on-container',
     [string]$TargetDir   = 'D:\R12OnContainer',
@@ -131,20 +132,14 @@ $deploy = Join-Path $CheckoutDir 'Deploy-R12.ps1'
 if (-not (Test-Path $deploy)) { Die "nao achei / not found: $deploy" }
 
 # ---------------------------------------------------------------------- config
-# Sem credencial no repositorio: ou vem por parametro, ou do config.psd1 local.
-# No credentials in the repo: either passed as parameters or from local config.psd1.
+# A senha do WebLogic tem padrao (o do pacote de referencia). O config.psd1
+# local, quando existe, sobrescreve parametros -- e o lugar certo para
+# credenciais proprias, ja que passar em linha de comando deixa rastro no
+# historico do PowerShell.
+# The WebLogic password has a default (the reference package's). A local
+# config.psd1, when present, overrides parameters -- the right place for your
+# own credentials, since the command line leaks into PowerShell history.
 $cfgFile = Join-Path $CheckoutDir 'config.psd1'
-if (-not $WlsPassword -and -not (Test-Path $cfgFile)) {
-    $exemplo = Join-Path $CheckoutDir 'config.example.psd1'
-    Copy-Item $exemplo $cfgFile -Force
-    Write-Host ''
-    Write-Host '    Faltou a senha do WebLogic. / WebLogic password missing.' -ForegroundColor Yellow
-    Write-Host "    Criei $cfgFile a partir do exemplo." -ForegroundColor Yellow
-    Write-Host '    Preencha e rode de novo, ou passe -WlsPassword.' -ForegroundColor Yellow
-    Write-Host '    Fill it in and re-run, or pass -WlsPassword.' -ForegroundColor Yellow
-    Write-Host ''
-    Die 'sem senha do WebLogic / no WebLogic password'
-}
 
 # ---------------------------------------------------------------------- deploy
 Write-Step 'Deploy'
