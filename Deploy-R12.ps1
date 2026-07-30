@@ -595,12 +595,37 @@ if (Should-Run 'Preflight') {
             Die ('o WSL nao esta instalado e isso exige Administrador. ' +
                  'Abra um PowerShell elevado e rode:  wsl --install --no-distribution')
         }
-        Write-Info 'instalando o WSL2 (pode exigir reinicio)'
-        & wsl --install --no-distribution
-        Write-Warn2 'se o Windows pedir reinicio, reinicie e rode de novo com -From Podman'
-    } else {
-        Write-Ok 'WSL2 presente'
+        Write-Info 'instalando o WSL2'
+        Invoke-Native { & wsl.exe --install --no-distribution }
+
+        # PARAR AQUI, sempre. Habilitar o Virtual Machine Platform e uma
+        # mudanca de feature do Windows que so vale no proximo boot. Seguir
+        # adiante sem reiniciar leva o "podman machine init" a mexer nas
+        # mesmas features com uma instalacao pendente, e ele morre com
+        # "Error: 1223 -- Operation was incomplete because of a cancel
+        # request" -- mensagem que nao tem nenhuma relacao aparente com
+        # reinicio. Antes daqui havia so um aviso; aviso nao basta.
+        # ALWAYS STOP HERE. Enabling the Virtual Machine Platform is a Windows
+        # feature change that only takes effect on the next boot. Continuing
+        # makes "podman machine init" touch the same features with a pending
+        # install, and it dies with "Error: 1223" -- a message with no
+        # apparent connection to rebooting.
+        Write-Host ''
+        Write-Host '  ================================================================' -ForegroundColor Yellow
+        Write-Host '   REINICIE O WINDOWS PARA CONTINUAR' -ForegroundColor Yellow
+        Write-Host '   REBOOT WINDOWS TO CONTINUE' -ForegroundColor Yellow
+        Write-Host '  ================================================================' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '   O WSL2 foi instalado, mas o componente de virtualizacao so'
+        Write-Host '   entra em vigor no proximo boot. Sem reiniciar, a criacao da'
+        Write-Host '   maquina Podman falha com "Error: 1223".'
+        Write-Host ''
+        Write-Host '   Depois de reiniciar, rode o MESMO comando de novo -- nada do'
+        Write-Host '   que ja foi feito se perde.'
+        Write-Host ''
+        Die 'reinicio necessario apos instalar o WSL2'
     }
+    Write-Ok 'WSL2 presente'
 }
 
 # --------------------------------------------------------------------- Podman
@@ -734,6 +759,25 @@ if (Should-Run 'Machine') {
             & cmd /c "podman machine rm -f $MachineName >nul 2>&1"
             $initTxt = ''
             if (Test-Path $initLog) { $initTxt = Get-Content $initLog -Raw }
+            # 1223 = ERROR_CANCELLED. Na pratica significa uma de duas coisas:
+            # mudanca de feature do Windows pendente de reinicio, ou prompt do
+            # UAC recusado. A mensagem do DISM nao menciona nenhuma das duas.
+            # 1223 = ERROR_CANCELLED: either a pending Windows feature change
+            # awaiting reboot, or a declined UAC prompt. The DISM message
+            # mentions neither.
+            if ($initTxt -match 'Error: 1223|cancel request') {
+                Write-Host ''
+                Write-Host '  O Windows recusou a operacao (erro 1223). Causas, nesta ordem:' -ForegroundColor Yellow
+                Write-Host '   1. Ha mudanca de componente pendente -- REINICIE o Windows e' -ForegroundColor Yellow
+                Write-Host '      rode o mesmo comando de novo. E de longe a causa mais comum.' -ForegroundColor Yellow
+                Write-Host '   2. Um prompt de elevacao (UAC) foi recusado ou expirou --' -ForegroundColor Yellow
+                Write-Host '      rode num PowerShell aberto como Administrador.' -ForegroundColor Yellow
+                Write-Host ''
+                Write-Host '  Windows refused the operation (error 1223): reboot for a pending' -ForegroundColor Yellow
+                Write-Host '  component change, or run from an elevated PowerShell.' -ForegroundColor Yellow
+                Write-Host ''
+                Die 'operacao cancelada pelo Windows (1223) -- provavelmente falta reiniciar'
+            }
             if ($initTxt -match 'HCS_E_HYPERV_NOT_INSTALLED|virtualization is not enabled') {
                 Write-Host ''
                 Write-Host 'A virtualizacao nao esta funcional neste Windows. O conserto (uma vez so):' -ForegroundColor Yellow
