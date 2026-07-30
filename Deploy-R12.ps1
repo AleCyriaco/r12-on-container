@@ -449,7 +449,33 @@ if (-not $ramOk) { $falhas.Add("RAM: $ramGb GB -- o minimo e $REQ_RAM_GB GB") }
 $cpu       = Get-CimInstance Win32_Processor | Select-Object -First 1
 $vtOk      = [bool]$cs.HypervisorPresent
 $vtMotivo  = ''
-if (-not $vtOk) {
+
+# HypervisorPresent nao basta. Ele diz que um hypervisor esta rodando, nao que
+# o WSL2 consegue criar VM. Quem prova isso e o Host Compute Service
+# (vmcompute): com o Virtual Machine Platform recem-habilitado e sem reiniciar,
+# ele nao existe ou nao sobe, e a criacao da maquina morre la na frente com
+#   Error code: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
+# HypervisorPresent is not enough: it says a hypervisor is running, not that
+# WSL2 can create a VM. The Host Compute Service (vmcompute) is what proves it.
+if ($vtOk) {
+    $hcs = Get-Service vmcompute -ErrorAction SilentlyContinue
+    if (-not $hcs) {
+        $vtOk = $false
+        $vtMotivo = 'servico Host Compute (vmcompute) ausente -- falta habilitar o Virtual Machine Platform'
+    } elseif ($hcs.Status -ne 'Running') {
+        try {
+            Start-Service vmcompute -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            $hcs = Get-Service vmcompute
+        } catch { }
+        if ($hcs.Status -ne 'Running') {
+            $vtOk = $false
+            $vtMotivo = 'servico Host Compute (vmcompute) nao inicia -- REINICIE o Windows'
+        }
+    }
+}
+
+if (-not $vtOk -and -not $vtMotivo) {
     if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
         $vtMotivo = 'VT-x/AMD-V desligado no firmware'
     } else {
@@ -784,6 +810,26 @@ if (Should-Run 'Machine') {
                 Write-Host '  component change, or run from an elevated PowerShell.' -ForegroundColor Yellow
                 Write-Host ''
                 Die 'operacao cancelada pelo Windows (1223) -- provavelmente falta reiniciar'
+            }
+            # HCS_E_SERVICE_NOT_AVAILABLE: o Virtual Machine Platform foi
+            # habilitado mas o servico de computacao do host ainda nao subiu.
+            # So o reinicio resolve -- aceitar a oferta do podman de instalar
+            # o WSL de novo nao adianta, ela termina pedindo o mesmo reboot.
+            # HCS_E_SERVICE_NOT_AVAILABLE: the Virtual Machine Platform was
+            # enabled but the host compute service has not started. Only a
+            # reboot fixes it.
+            if ($initTxt -match 'HCS_E_SERVICE_NOT_AVAILABLE|required feature is not installed') {
+                Write-Host ''
+                Write-Host '  O componente de virtualizacao esta habilitado mas ainda nao ativo.' -ForegroundColor Yellow
+                Write-Host '  REINICIE o Windows e rode o mesmo comando de novo.' -ForegroundColor Yellow
+                Write-Host ''
+                Write-Host '  Se o Podman oferecer instalar o WSL, pode recusar: o WSL ja esta' -ForegroundColor Yellow
+                Write-Host '  instalado, e a oferta termina pedindo o mesmo reinicio.' -ForegroundColor Yellow
+                Write-Host ''
+                Write-Host '  Virtualisation component enabled but not yet active. REBOOT Windows' -ForegroundColor Yellow
+                Write-Host '  and re-run the same command.' -ForegroundColor Yellow
+                Write-Host ''
+                Die 'reinicio necessario para ativar a virtualizacao'
             }
             if ($initTxt -match 'HCS_E_HYPERV_NOT_INSTALLED|virtualization is not enabled') {
                 Write-Host ''
@@ -1464,9 +1510,19 @@ df -h /var/ebs-u01 | tail -1
     # Painel local com credenciais e atalhos. Gerado aqui, nunca commitado:
     # carrega todas as senhas em texto puro e este repositorio e publico.
     Write-Host "`n-- painel local --" -ForegroundColor Cyan
-    $gerador = Join-Path $PSScriptRoot 'New-Painel.ps1'
-    if (-not (Test-Path $gerador)) { $gerador = Join-Path (Get-Location).Path 'New-Painel.ps1' }
-    if (Test-Path $gerador) {
+    # $PSScriptRoot e VAZIO quando este script roda carregado em memoria (o
+    # caminho normal via bootstrap), e Join-Path com caminho vazio nao falha
+    # em silencio: estoura com "Cannot bind argument to parameter 'Path'".
+    # $PSScriptRoot is EMPTY when this runs as an in-memory scriptblock (the
+    # normal bootstrap path), and Join-Path throws on an empty Path.
+    $gerador = $null
+    foreach ($base in @($PSScriptRoot, (Get-Location).Path, 'C:\r12-on-container')) {
+        if ($base -and (Test-Path (Join-Path $base 'New-Painel.ps1'))) {
+            $gerador = Join-Path $base 'New-Painel.ps1'
+            break
+        }
+    }
+    if ($gerador) {
         try {
             & $gerador -TargetDir $TargetDir -MachineName $MachineName -AppsHost $AppsHost `
                        -WlsPassword $WlsPassword -AppsPassword $AppsPassword
