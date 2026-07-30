@@ -84,7 +84,7 @@ function Invoke-Native {
     param([Parameter(Mandatory)][scriptblock]$Command)
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Command } finally { $ErrorActionPreference = $old }
+    try { & $Command } catch { } finally { $ErrorActionPreference = $old }
 }
 
 function Write-Step { param([string]$m) Write-Host "`n>>> $m" -ForegroundColor Cyan }

@@ -55,7 +55,7 @@ function Write-W    { param([string]$m) Write-Host "    $m" -ForegroundColor Yel
 function Invoke-Native {
     param([Parameter(Mandatory)][scriptblock]$Command)
     $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { & $Command } finally { $ErrorActionPreference = $old }
+    try { & $Command } catch { } finally { $ErrorActionPreference = $old }
 }
 
 Write-Host "`n=== O que existe ===" -ForegroundColor Cyan

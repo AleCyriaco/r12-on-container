@@ -186,11 +186,20 @@ function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColo
 # Runs a native command with stderr redirected WITHOUT the PS 5.1 side effect:
 # under ErrorActionPreference=Stop, "2>&1"/"2>$null" on natives turns stderr
 # lines into thrown exceptions. Preference is relaxed only for the call.
+# O try/catch NAO e redundante com a troca de preferencia -- e o que realmente
+# funciona. Medido: so relaxar o $ErrorActionPreference (local OU $script:) nao
+# impede o aborto, porque o scriptblock nao enxerga a mudanca. Com o catch, os
+# tres casos se comportam: binario ausente nao derruba o deploy, stderr de
+# comando nativo e capturado normalmente, e erros fora daqui seguem propagando.
+# The try/catch is NOT redundant with the preference change -- it is the part
+# that actually works. Measured: relaxing $ErrorActionPreference alone (local
+# OR $script:) does not prevent the abort, because the scriptblock does not see
+# the change.
 function Invoke-Native {
     param([Parameter(Mandatory)][scriptblock]$Command)
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Command } finally { $ErrorActionPreference = $old }
+    try { & $Command } catch { } finally { $ErrorActionPreference = $old }
 }
 
 function Should-Run {
@@ -556,11 +565,17 @@ if (Should-Run 'Preflight') {
     # A maquina alvo ja existe? Avisar ANTES de qualquer coisa comecar.
     # O -MachineName tem padrao 'ebs': numa maquina onde esse nome ja e uma
     # instancia em producao, seguir adiante significa extrair por cima dela.
-    # Warn BEFORE anything starts if the target machine already exists: with
-    # the default -MachineName, continuing means extracting over a live
-    # instance.
-    $jaTem = @(Invoke-Native { & podman machine list --format '{{.Name}}' 2>$null }) |
-             Where-Object { ($_ -replace '\*$','') -eq $MachineName }
+    #
+    # So faz sentido perguntar se o podman ja estiver instalado -- numa maquina
+    # limpa ele so chega na fase seguinte, e chamar o binario aqui quebrava o
+    # deploy logo no inicio com "The term 'podman' is not recognized".
+    # Only ask if podman is already installed: on a clean machine it arrives in
+    # the next phase, and calling it here broke the deploy right at the start.
+    $jaTem = $null
+    if (Get-Command podman -ErrorAction SilentlyContinue) {
+        $jaTem = @(Invoke-Native { & podman machine list --format '{{.Name}}' 2>$null }) |
+                 Where-Object { ($_ -replace '\*$','') -eq $MachineName }
+    }
     if ($jaTem -and $From -eq 'All') {
         Write-Host ''
         Write-Host "  ATENCAO: a maquina podman '$MachineName' JA EXISTE nesta maquina." -ForegroundColor Yellow
