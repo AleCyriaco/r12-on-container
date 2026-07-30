@@ -742,16 +742,23 @@ if (Should-Run 'Machine') {
         Write-Ok "a maquina '$MachineName' ja existe"
     } else {
         Write-Info "criando a maquina ($Cpus CPUs, $MemoryMB MB, $DiskGB GB)"
-        # via cmd /c com redirecionamento do PROPRIO cmd: no PowerShell 5.1,
-        # "2>&1" em comando nativo com ErrorActionPreference=Stop transforma
-        # cada linha de stderr em excecao -- e o erro real morre no meio.
-        # cmd /c with cmd's own redirection: in PS 5.1, "2>&1" on a native
-        # command under ErrorActionPreference=Stop turns stderr into thrown
-        # exceptions, killing the real error message mid-flight.
-        $initLog = Join-Path $script:LogsDir 'podman-init.log'
-        & cmd /c "podman machine init $MachineName --cpus $Cpus --memory $MemoryMB --disk-size $DiskGB > `"$initLog`" 2>&1"
-        $initRc  = $LASTEXITCODE
-        Get-Content $initLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+        Write-Info 'baixa ~1 GB da imagem da VM na primeira vez -- alguns minutos'
+        # A saida vai para a tela E para o log ao mesmo tempo. Antes ela ia so
+        # para o arquivo, e o passo mais demorado do deploy virava o mais
+        # silencioso -- quem esta olhando conclui que travou.
+        # Output goes to the screen AND the log. It used to go only to the
+        # file, which made the slowest step look like a freeze.
+        $initLog   = Join-Path $script:LogsDir 'podman-init.log'
+        $initLinhas = New-Object Collections.Generic.List[string]
+        Invoke-Native {
+            & podman machine init $MachineName --cpus $Cpus --memory $MemoryMB --disk-size $DiskGB 2>&1
+        } | ForEach-Object {
+            $linha = "$_"
+            $initLinhas.Add($linha)
+            Write-Host "    $linha"
+        }
+        $initRc = $LASTEXITCODE
+        [IO.File]::WriteAllLines($initLog, $initLinhas)
         if ($initRc -ne 0) {
             # nao deixar registro pela metade: um init que falhou no import do
             # WSL as vezes registra a maquina sem VM por tras, e a proxima
