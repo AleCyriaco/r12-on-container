@@ -872,9 +872,84 @@ if (Should-Run 'Machine') {
     $running = @(Invoke-Native { & podman machine list --format '{{.Name}} {{.LastUp}}' 2>$null }) |
                Where-Object { $_ -like "$MachineName*" -and $_ -like '*Currently running*' }
     if (-not $running) {
-        Write-Info 'iniciando a maquina'
-        & podman machine start $MachineName
-        if ($LASTEXITCODE -ne 0) { Die 'falha ao iniciar a maquina' }
+        # O start pode morrer com HCS_E_CONNECTION_TIMEOUT: o Host Compute
+        # Service manda o WSL2 criar a VM e nao recebe resposta no prazo; o
+        # podman so repassa. Quase sempre e estado preso de uma tentativa
+        # anterior (ou de um "Desligar" com Fast Startup) ou falta de RAM
+        # livre na hora do boot -- derrubar o WSL inteiro e tentar de novo
+        # resolve a maioria. A orientacao manual fica para depois que as
+        # tentativas esgotarem: o conserto envolve reiniciar o Windows, e
+        # isso nao da para automatizar daqui.
+        # "start" can die with HCS_E_CONNECTION_TIMEOUT: the Host Compute
+        # Service asks WSL2 to create the VM and gets no answer in time;
+        # podman just relays it. Almost always stale state from a previous
+        # attempt (or a Fast Startup shutdown) or not enough free RAM at
+        # boot -- tearing WSL down and retrying fixes most cases. Manual
+        # guidance only once the retries are spent: the fix needs a reboot,
+        # which we cannot automate from here.
+        $startLog  = Join-Path $script:LogsDir 'podman-start.log'
+        $maxTent   = 3
+        $tentativa = 0
+        while ($true) {
+            $tentativa++
+            if ($tentativa -eq 1) { Write-Info 'iniciando a maquina' }
+            else { Write-Info "iniciando a maquina (tentativa $tentativa de $maxTent)" }
+
+            $startLinhas = New-Object Collections.Generic.List[string]
+            Invoke-Native { & podman machine start $MachineName 2>&1 } | ForEach-Object {
+                $linha = "$_"
+                $startLinhas.Add($linha)
+                Write-Host "    $linha"
+            }
+            $startRc = $LASTEXITCODE
+            [IO.File]::WriteAllLines($startLog, $startLinhas)
+            if ($startRc -eq 0) { break }
+
+            $startTxt = $startLinhas -join "`n"
+            # "already running"/"currently starting" e a mesma doenca vista
+            # de dentro do podman: um start que falhou deixou o registro de
+            # estado dizendo que a maquina esta no ar. A limpeza e a mesma.
+            # "already running"/"currently starting" is the same disease as
+            # seen from inside podman: a failed start left the state file
+            # claiming the machine is up. Same cleanup applies.
+            $transitorio = $startTxt -match 'HCS_E_CONNECTION_TIMEOUT|response was not received|already running|currently starting'
+            if ($transitorio -and $tentativa -lt $maxTent) {
+                Write-Warn2 'o WSL nao respondeu a tempo; limpando o estado para tentar de novo.'
+                Write-Info 'derrubando o WSL (outras distros WSL desta maquina tambem param)'
+                & cmd /c "podman machine stop $MachineName >nul 2>&1"
+                & wsl --shutdown
+                # O WSL exige ~8 s parado antes de aceitar subir de novo; a
+                # espera cresce por tentativa para a RAM do host assentar.
+                # WSL needs ~8 s down before it will start again; the wait
+                # grows per attempt so host RAM can settle.
+                Start-Sleep -Seconds (15 * $tentativa)
+                continue
+            }
+
+            if ($startTxt -match 'HCS_E_CONNECTION_TIMEOUT|response was not received') {
+                Write-Host ''
+                Write-Host "  O WSL2 nao conseguiu subir a VM ($maxTent tentativas com estado limpo)." -ForegroundColor Yellow
+                Write-Host '  Causas e consertos, do mais provavel ao menos:' -ForegroundColor Yellow
+                Write-Host '   1. Pouca RAM livre: feche navegador/Teams/etc. e rode o mesmo' -ForegroundColor Yellow
+                Write-Host '      comando de novo com -From Machine. Host de 16 GB e limite.' -ForegroundColor Yellow
+                Write-Host '   2. wsl --update  e depois REINICIE o Windows. Reiniciar mesmo:' -ForegroundColor Yellow
+                Write-Host '      o "Desligar" com Fast Startup hiberna o kernel e NAO limpa' -ForegroundColor Yellow
+                Write-Host '      o servico de virtualizacao que travou.' -ForegroundColor Yellow
+                Write-Host '   3. Antivirus de terceiro em cima do vmcompute; teste sem ele.' -ForegroundColor Yellow
+                Write-Host "   4. Para isolar o podman:  wsl -d podman-$MachineName echo ok" -ForegroundColor Yellow
+                Write-Host '      -- falhando igual, o problema e do WSL, nao deste deploy.' -ForegroundColor Yellow
+                Write-Host ''
+                Write-Host '  WSL2 could not bring the VM up (HCS_E_CONNECTION_TIMEOUT) even' -ForegroundColor Yellow
+                Write-Host "  after $maxTent clean-state attempts. Most likely, in order: free" -ForegroundColor Yellow
+                Write-Host '  host RAM and re-run with -From Machine; "wsl --update" then' -ForegroundColor Yellow
+                Write-Host '  RESTART Windows (a Fast Startup shutdown does not clear it);' -ForegroundColor Yellow
+                Write-Host '  third-party antivirus on vmcompute; isolate podman with' -ForegroundColor Yellow
+                Write-Host "  'wsl -d podman-$MachineName echo ok'." -ForegroundColor Yellow
+                Write-Host ''
+                Die 'o WSL nao subiu a VM (HCS_E_CONNECTION_TIMEOUT) -- siga os passos acima'
+            }
+            Die "falha ao iniciar a maquina -- detalhes em $startLog"
+        }
     }
 
     # O WSL ignora parte do dimensionamento do podman: quem manda e o .wslconfig

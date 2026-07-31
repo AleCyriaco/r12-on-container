@@ -197,6 +197,40 @@ saída sozinho não prova nada.
 
 ---
 
+## A máquina não inicia: HCS_E_CONNECTION_TIMEOUT
+
+```
+Starting machine "ebs"
+The operation timed out because a response was not received from the virtual machine or container.
+Error code: Wsl/Service/CreateInstance/HCS_E_CONNECTION_TIMEOUT
+Error: the WSL bootstrap script failed: ... exit status 0xffffffff
+```
+
+**Causa.** O Host Compute Service pediu ao WSL2 a criação da VM e não recebeu
+resposta no prazo; o podman só repassa o erro. Quase sempre é uma destas:
+estado preso de uma tentativa anterior (ou de um "Desligar" com Fast Startup,
+que hiberna o kernel e não limpa o serviço de virtualização), pouca RAM livre
+no host na hora do boot, WSL desatualizado, ou antivírus de terceiro em cima
+do `vmcompute`.
+
+**Correção.** O deploy se recupera sozinho: derruba o WSL
+(`podman machine stop` + `wsl --shutdown`), espera e tenta de novo, até três
+vezes. Se as três se esgotarem, na ordem do mais provável:
+
+1. Feche o que consome RAM e rode o mesmo comando com `-From Machine` — host
+   de 16 GB fica no limite para esta VM.
+2. `wsl --update` e **reinicie** o Windows. Reiniciar mesmo: o "Desligar" com
+   Fast Startup não limpa o serviço que travou.
+3. Teste sem o antivírus de terceiro.
+4. Para isolar o podman: `wsl -d podman-ebs echo ok` — falhando igual, o
+   problema é do WSL, não deste deploy.
+
+**Pista falsa.** O `exit status 0xffffffff` no fim aponta para o script de
+bootstrap do podman, mas ele nem chegou a rodar: a VM não subiu. O erro real é
+a linha do meio, `Wsl/Service/CreateInstance/HCS_E_CONNECTION_TIMEOUT`.
+
+---
+
 ## Não consigo mover o disco da VM: ERROR_SHARING_VIOLATION
 
 ```
