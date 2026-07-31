@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Gera um painel local (painel.html) e atalhos .bat para operar a instancia.
     Generates a local dashboard (painel.html) and .bat shortcuts.
@@ -68,7 +68,17 @@ if (-not $CllPassword)       { $CllPassword       = '(veja o README do seu pacot
 if (-not $WlsPassword)       { $WlsPassword       = '(veja o README do seu pacote)' }
 
 New-Item -ItemType Directory -Force -Path $TargetDir, (Join-Path $TargetDir 'scripts') | Out-Null
-$utf8 = New-Object Text.UTF8Encoding($true)   # com BOM: o navegador acerta o encoding
+# Encoding aqui e decisao POR CONSUMIDOR -- e este proprio arquivo precisa
+# do BOM dele: sem BOM o PowerShell 5.1 le o .ps1 como ANSI e todo acento
+# dos textos abaixo vira lixo (mÃ¡quina) antes mesmo de chegar ao HTML.
+#   painel.html -> UTF-8 COM BOM   (navegador acerta o encoding)
+#   *.bat       -> SEM BOM         (cmd.exe nao entende BOM e quebra o @echo off)
+#   *.sh        -> SEM BOM, so LF  (bash)
+# Encoding is a PER-CONSUMER decision -- and this very file needs its own
+# BOM: PowerShell 5.1 reads a BOM-less .ps1 as ANSI, mangling every accent
+# before it even reaches the HTML.
+$utf8      = New-Object Text.UTF8Encoding($true)
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
 $wslTarget = '/mnt/' + $TargetDir.Substring(0,1).ToLower() + ($TargetDir.Substring(2) -replace '\\','/')
 
 # Copiar os .sh do repositorio para a pasta da instancia, com quebras LF.
@@ -80,7 +90,6 @@ $origem = $PSScriptRoot
 if (-not $origem) { $origem = (Get-Location).Path }
 $origemScripts = Join-Path $origem 'scripts'
 if (Test-Path $origemScripts) {
-    $utf8NoBom = New-Object Text.UTF8Encoding($false)
     foreach ($sh in @('bringup.sh','parar-ebs.sh','status-ebs.sh')) {
         $src = Join-Path $origemScripts $sh
         if (Test-Path $src) {
@@ -154,9 +163,9 @@ echo.
 pause
 "@
 
-[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-iniciar.bat'), $batIniciar, $utf8)
-[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-parar.bat'),   $batParar,   $utf8)
-[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-status.bat'),  $batStatus,  $utf8)
+[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-iniciar.bat'), $batIniciar, $utf8NoBom)
+[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-parar.bat'),   $batParar,   $utf8NoBom)
+[IO.File]::WriteAllText((Join-Path $TargetDir 'ebs-status.bat'),  $batStatus,  $utf8NoBom)
 
 # ------------------------------------------------------------------- painel
 $html = @'
