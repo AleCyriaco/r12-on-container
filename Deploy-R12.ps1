@@ -1456,7 +1456,17 @@ shutdown abort;
 create pfile='/tmp/ebs-sga.ora' from spfile;
 exit
 SQL
-grep -viE "(sga_target|sga_max_size|pga_aggregate_target)[[:space:]]*=" /tmp/ebs-sga.ora > /tmp/ebs-sga-novo.ora
+# Os pools fixados no spfile original foram dimensionados para a SGA de 20G:
+# a soma deles vira um piso e o startup recusa a sga_target reduzida com
+# ORA-00821 ("needs to be at least ..."). Removidos do pfile, o ASMM os
+# dimensiona sozinho dentro da sga_target.
+# The pinned pools in the original spfile were sized for the 20G SGA: their
+# sum becomes a floor and startup rejects the reduced sga_target with
+# ORA-00821. Dropped from the pfile, ASMM sizes them within sga_target.
+POOLS="shared_pool_size|shared_pool_reserved_size|db_cache_size|db_keep_cache_size|db_recycle_cache_size|db_[0-9]+k_cache_size|java_pool_size|large_pool_size|streams_pool_size"
+grep -viE "(sga_target|sga_max_size|pga_aggregate_target|$POOLS)[[:space:]]*=" /tmp/ebs-sga.ora > /tmp/ebs-sga-novo.ora
+echo "--- pools fixos removidos (o ASMM os encaixa na sga_target) ---"
+grep -iE "($POOLS)[[:space:]]*=" /tmp/ebs-sga.ora || echo "(nenhum)"
 printf '%s\n' '*.sga_target=__SGA__G' '*.sga_max_size=__SGAMAX__G' '*.pga_aggregate_target=__PGA__G' >> /tmp/ebs-sga-novo.ora
 sqlplus -s / as sysdba <<SQL
 create spfile from pfile='/tmp/ebs-sga-novo.ora';

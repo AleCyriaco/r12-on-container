@@ -228,6 +228,19 @@ nessa, basta retomar dos serviços:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) -BaseUrl '<base-url-do-seu-pacote>' -From Services
 ```
 
+**Variante: ORA-00821 depois da redução.**
+
+```
+ORA-00821: Specified value of sga_target 4096M is too small, needs to be at least 4240M
+ORA-01078: failure in processing system parameters
+```
+
+Mesmo espírito, outro parâmetro: o spfile original também **fixa os pools**
+(`shared_pool_size`, `db_cache_size`, `java_pool_size`…) em tamanhos do mundo
+de 20G. A soma dos pools fixados vira um piso, e a `sga_target` reduzida fica
+abaixo dele. A redução passou a remover esses parâmetros do pfile: sem valor
+fixado, o ASMM os dimensiona sozinho dentro da `sga_target`.
+
 **Pistas falsas.** Três na mesma tela: o ORA-32004 é ruído (parâmetros
 obsoletos no spfile do pacote, inofensivo); o "aguardando o serviço registrar
 no listener" sugere lentidão de listener quando o banco nem subiu; e o

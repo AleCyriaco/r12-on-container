@@ -228,6 +228,19 @@ already bitten, just resume from the services:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) -BaseUrl '<your package base URL>' -From Services
 ```
 
+**Variant: ORA-00821 after the reduction.**
+
+```
+ORA-00821: Specified value of sga_target 4096M is too small, needs to be at least 4240M
+ORA-01078: failure in processing system parameters
+```
+
+Same spirit, different parameter: the original spfile also **pins the pools**
+(`shared_pool_size`, `db_cache_size`, `java_pool_size`…) at 20G-world sizes.
+The sum of the pinned pools becomes a floor, and the reduced `sga_target`
+lands below it. The reduction now drops those parameters from the pfile: with
+no pinned value, ASMM sizes them automatically within `sga_target`.
+
 **Decoys.** Three on the same screen: ORA-32004 is noise (obsolete parameters
 in the package spfile, harmless); "waiting for the service to register with
 the listener" suggests listener slowness when the database never started; and
