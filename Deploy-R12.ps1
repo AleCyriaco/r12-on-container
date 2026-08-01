@@ -973,22 +973,30 @@ echo "freegb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
     }
 
     Write-Info 'aplicando os ajustes de kernel do Oracle'
-    $shmmax = 34359738368
-    if ($SgaGb -gt 0) { $shmmax = [int64]($SgaGb * 1.6 * 1GB) }
-
+    # shmmax/shmall sao TETOS, nao reserva de memoria -- nao existe "ajustar
+    # para baixo" em host pequeno. A versao anterior derivava o shmmax da SGA
+    # REDUZIDA (SgaGb*1.6), que e menor que a SGA do spfile ORIGINAL do
+    # pacote: o primeiro startup da reducao de SGA morria com ORA-27104 e a
+    # reducao nunca acontecia. Tetos folgados custam zero e servem para
+    # qualquer spfile, original ou reduzido.
+    # shmmax/shmall are CEILINGS, not reservations -- there is no "tuning
+    # down" for a small host. Deriving shmmax from the REDUCED SGA made it
+    # smaller than the ORIGINAL spfile's SGA, so the reduction's own startup
+    # died with ORA-27104 and the reduction never happened. Roomy ceilings
+    # cost nothing and fit any spfile, original or reduced.
     $sysctlTpl = @'
 sudo tee /etc/sysctl.d/98-oracle.conf >/dev/null <<EOF
-kernel.shmmax = __SHMMAX__
-kernel.shmall = 8388608
+kernel.shmmax = 34359738368
+kernel.shmall = 16777216
 kernel.sem = 250 32000 100 128
 fs.file-max = 6815744
 fs.aio-max-nr = 1048576
 vm.max_map_count = 262144
 EOF
 sudo sysctl --system >/dev/null
-echo "shmmax = $(sysctl -n kernel.shmmax)"
+echo "shmmax = $(sysctl -n kernel.shmmax), shmall = $(sysctl -n kernel.shmall)"
 '@
-    Invoke-Vm -Name 'sysctl' -Script $sysctlTpl.Replace('__SHMMAX__', "$shmmax")
+    Invoke-Vm -Name 'sysctl' -Script $sysctlTpl
 }
 
 # ------------------------------------------------------------------- Download
@@ -1427,18 +1435,54 @@ if (Should-Run 'Services') {
         Write-Info "reduzindo a SGA para $SgaGb GB antes do primeiro startup"
         $sgaMax = $SgaGb + 2
         $pga    = [math]::Max(2, [int]($SgaGb/4))
+        # Tudo com a instancia PARADA: CREATE PFILE FROM SPFILE e CREATE
+        # SPFILE FROM PFILE funcionam de banco fechado. A versao anterior
+        # precisava de "startup nomount" para o alter system -- mas o nomount
+        # carrega o spfile ORIGINAL do pacote (SGA 20G), que nao cabia nos
+        # limites de shared memory de uma VM pequena: ORA-27104 antes de
+        # qualquer alter, e a reducao nunca acontecia. Ovo e galinha.
+        # Everything runs with the instance DOWN: both CREATE statements work
+        # against a closed database. The previous version needed "startup
+        # nomount" for the alters -- but nomount loads the ORIGINAL 20G
+        # spfile, which did not fit a small VM's shared-memory limits:
+        # ORA-27104 before any alter could land. Chicken and egg.
         $sgaTpl = @'
-podman exec -i -u oracle ebs bash -lc 'source /u01/install/APPS/19.0.0/EBSCDB_apps.env; sqlplus -s / as sysdba' <<'SQL'
-startup nomount;
-alter system set sga_target=__SGA__G scope=spfile;
-alter system set sga_max_size=__SGAMAX__G scope=spfile;
-alter system set pga_aggregate_target=__PGA__G scope=spfile;
-shutdown immediate;
+#!/bin/bash
+set -uo pipefail
+SAIDA=$(podman exec -i -u oracle ebs bash -s <<'DENTRO' 2>&1
+source /u01/install/APPS/19.0.0/EBSCDB_apps.env
+sqlplus -s / as sysdba <<SQL
+shutdown abort;
+create pfile='/tmp/ebs-sga.ora' from spfile;
 exit
 SQL
+grep -viE "(sga_target|sga_max_size|pga_aggregate_target)[[:space:]]*=" /tmp/ebs-sga.ora > /tmp/ebs-sga-novo.ora
+printf '%s\n' '*.sga_target=__SGA__G' '*.sga_max_size=__SGAMAX__G' '*.pga_aggregate_target=__PGA__G' >> /tmp/ebs-sga-novo.ora
+sqlplus -s / as sysdba <<SQL
+create spfile from pfile='/tmp/ebs-sga-novo.ora';
+exit
+SQL
+echo "--- valores gravados ---"
+grep -E "sga_target|sga_max_size|pga_aggregate_target" /tmp/ebs-sga-novo.ora
+DENTRO
+)
+echo "$SAIDA" | grep -v "^$"
+# ORA-01034/01507 do shutdown com a instancia ja parada sao esperados;
+# qualquer outro ORA- e falha real (spfile fora do padrao, permissao...).
+if echo "$SAIDA" | grep "ORA-" | grep -vqE "ORA-01034|ORA-01507"; then
+  echo "ERRO: a reducao de SGA falhou"
+  exit 1
+fi
+if ! echo "$SAIDA" | grep -q "sga_target=__SGA__G"; then
+  echo "ERRO: os valores novos nao aparecem no pfile gerado"
+  exit 1
+fi
+echo "[*] reducao de SGA OK"
 '@
-        Invoke-Vm -Name 'sga' -Script `
-            $sgaTpl.Replace('__SGA__',"$SgaGb").Replace('__SGAMAX__',"$sgaMax").Replace('__PGA__',"$pga")
+        $sgaOut = @(Invoke-Vm -Name 'sga' -PassThru -Script `
+            $sgaTpl.Replace('__SGA__',"$SgaGb").Replace('__SGAMAX__',"$sgaMax").Replace('__PGA__',"$pga"))
+        $sgaOut | ForEach-Object { Write-Host "    $_" }
+        if (($sgaOut -join "`n") -match 'ERRO:') { Die 'a reducao de SGA falhou; veja a saida acima' }
     }
 
     if (-not $WlsPassword) {
@@ -1472,12 +1516,22 @@ echo "[*] banco + listener"
 # stop+start: se o listener subiu antes da correcao do /etc/hosts esta com o
 # binding errado. Sempre "lsnrctl stop" no ORACLE_HOME certo, nunca
 # "pkill -f tnslsnr" -- esse padrao derruba tambem o listener do apps tier.
-podman exec -i -u oracle "$CTR" bash -lc '
+DB=$(podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/19.0.0/EBSCDB_apps.env
   lsnrctl stop  >/dev/null 2>&1
   lsnrctl start >/dev/null 2>&1
   sqlplus -s / as sysdba <<< "startup;"
-  sqlplus -s / as sysdba <<< "alter system register;" >/dev/null 2>&1' 2>&1 | tail -6
+  sqlplus -s / as sysdba <<< "alter system register;" >/dev/null 2>&1' 2>&1)
+echo "$DB" | tail -6
+# Sem banco aberto o resto e perda de tempo: a espera de 150s estoura e o
+# adstrtal falha culpando as credenciais, com o erro real 200 linhas acima.
+# ORA-01081 = "ja estava aberto", que aqui conta como sucesso.
+if ! echo "$DB" | grep -qiE "Database opened|ORA-01081"; then
+  echo "ERRO: o banco nao abriu -- interrompendo antes do adstrtal."
+  echo "      ORA-27104/ORA-00845 = limites de memoria x SGA do spfile:"
+  echo "      veja docs/TROUBLESHOOTING.pt-BR.md, secao ORA-27104."
+  exit 1
+fi
 
 # Esperar o servico aceitar conexao ANTES do adstrtal: rodar na janela entre
 # "banco aberto" e "servico registrado" produz a mesma mensagem enganosa sobre
@@ -1530,7 +1584,8 @@ echo "[*] services OK"
 
     Invoke-Vm -Name 'services' -Detached -Script `
         $svcTpl.Replace('__WLSPWD__', $WlsPassword).Replace('__APPSPWD__', $AppsPassword).Replace('__APPSHOST__', $AppsHost)
-    $null = Wait-VmStep -Name 'services' -TimeoutMin 90
+    $svcRc = Wait-VmStep -Name 'services' -TimeoutMin 90
+    if ("$svcRc" -ne '0') { Die 'os servicos nao subiram; veja logs\services.log' }
     Write-Ok 'servicos iniciados'
 }
 

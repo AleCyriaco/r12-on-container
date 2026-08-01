@@ -197,6 +197,46 @@ saída sozinho não prova nada.
 
 ---
 
+## O banco não abre: ORA-27104 no startup
+
+```
+[*] banco + listener
+ORA-32004: obsolete or deprecated parameter(s) specified for RDBMS instance
+ORA-27104: system-defined limits for shared memory was misconfigured
+[*] aguardando o servico EBSDB registrar no listener
+    AVISO: servico nao respondeu em 150s -- seguindo assim mesmo
+adstrtal.sh: exiting with status 1
+```
+
+**Causa.** Ovo e galinha em torno da redução de SGA (`-SgaGb`, automática em
+hosts de 16 GB). A fase Machine reduzia o `kernel.shmmax` da VM para "SGA
+reduzida × 1,6" — menor que a SGA de 20G do spfile **original** do pacote. O
+passo de redução fazia `startup nomount` para poder alterar o spfile; o
+nomount carregava o spfile original, que não cabia no limite recém-apertado, e
+morria com ORA-27104 **antes** de qualquer `alter system`. Resultado: o spfile
+seguia pedindo 20G, o limite seguia em ~6G, e nenhum startup posterior tinha
+como funcionar — nem no deploy, nem no `ebs-iniciar.bat`.
+
+**Correção.** Em duas frentes, ambas já no repositório: a redução de SGA
+passou a ser feita de banco **fechado** (`create pfile from spfile` → edita →
+`create spfile from pfile`; os dois CREATE funcionam com a instância parada,
+sem nomount nenhum), e o `shmmax`/`shmall` viraram tetos folgados fixos — teto
+não reserva memória, não havia o que "economizar". Numa máquina que já caiu
+nessa, basta retomar dos serviços:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) -BaseUrl '<base-url-do-seu-pacote>' -From Services
+```
+
+**Pistas falsas.** Três na mesma tela: o ORA-32004 é ruído (parâmetros
+obsoletos no spfile do pacote, inofensivo); o "aguardando o serviço registrar
+no listener" sugere lentidão de listener quando o banco nem subiu; e o
+`adstrtal.sh: exiting with status 1` reporta credenciais do APPS erradas — o
+erro real é o primeiro da cascata. Desde a correção, o start é interrompido na
+hora com "o banco nao abriu" em vez de deixar a cascata acontecer.
+
+---
+
 ## A máquina não inicia: HCS_E_CONNECTION_TIMEOUT
 
 ```

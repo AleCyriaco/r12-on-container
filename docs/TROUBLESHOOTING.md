@@ -197,6 +197,46 @@ nothing.
 
 ---
 
+## Database will not open: ORA-27104 at startup
+
+```
+[*] banco + listener
+ORA-32004: obsolete or deprecated parameter(s) specified for RDBMS instance
+ORA-27104: system-defined limits for shared memory was misconfigured
+[*] aguardando o servico EBSDB registrar no listener
+    AVISO: servico nao respondeu em 150s -- seguindo assim mesmo
+adstrtal.sh: exiting with status 1
+```
+
+**Cause.** A chicken-and-egg around the SGA reduction (`-SgaGb`, automatic on
+16 GB hosts). The Machine phase used to lower the VM's `kernel.shmmax` to
+"reduced SGA × 1.6" — smaller than the 20G SGA of the package's **original**
+spfile. The reduction step ran `startup nomount` in order to alter the spfile;
+nomount loads the original spfile, which no longer fit the freshly lowered
+limit, and died with ORA-27104 **before** any `alter system` could land. Net
+result: the spfile kept asking for 20G, the limit stayed at ~6G, and no later
+startup could ever work — not in the deploy, not in `ebs-iniciar.bat`.
+
+**Fix.** Two-pronged, both already in the repository: the SGA reduction now
+runs against a **closed** database (`create pfile from spfile` → edit →
+`create spfile from pfile`; both CREATE statements work with the instance
+down, no nomount involved), and `shmmax`/`shmall` became fixed roomy ceilings
+— a ceiling reserves no memory, there was nothing to "save". On a machine
+already bitten, just resume from the services:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) -BaseUrl '<your package base URL>' -From Services
+```
+
+**Decoys.** Three on the same screen: ORA-32004 is noise (obsolete parameters
+in the package spfile, harmless); "waiting for the service to register with
+the listener" suggests listener slowness when the database never started; and
+`adstrtal.sh: exiting with status 1` reports wrong APPS credentials — the real
+error is the first of the cascade. Since the fix, startup aborts immediately
+with "o banco nao abriu" instead of letting the cascade unfold.
+
+---
+
 ## Machine will not start: HCS_E_CONNECTION_TIMEOUT
 
 ```

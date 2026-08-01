@@ -55,15 +55,28 @@ echo "[*] banco + listener"
 # /etc/hosts, ele esta com o binding errado. E "lsnrctl stop" no ORACLE_HOME
 # certo, nunca "pkill -f tnslsnr" -- esse padrao casa tambem com o listener do
 # apps tier na 1626 e derruba os dois.
-podman exec -i -u oracle "$CTR" bash -lc '
+DB=$(podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/19.0.0/EBSCDB_apps.env
   lsnrctl stop  >/dev/null 2>&1
   lsnrctl start >/dev/null 2>&1
   sqlplus -s / as sysdba <<< "startup;"
   # o listener sobe antes do banco e fica sem servicos; forcar o registro
   # encurta a espera do PMON, que so registraria sozinho em ~60s
-  sqlplus -s / as sysdba <<< "alter system register;" >/dev/null 2>&1' 2>&1 |
-  grep -viE "^$|already" | tail -5
+  sqlplus -s / as sysdba <<< "alter system register;" >/dev/null 2>&1' 2>&1)
+echo "$DB" | grep -viE "^$|already" | tail -5
+# Sem banco aberto o resto e perda de tempo: a espera de 150s estoura e o
+# adstrtal falha culpando as credenciais do APPS, com o erro real la em cima.
+# ORA-01081 = "ja estava aberto", que aqui conta como sucesso.
+# Without an open database the rest is wasted time: the 150s wait expires and
+# adstrtal blames the APPS credentials for what actually failed right here.
+if ! echo "$DB" | grep -qiE "Database opened|ORA-01081"; then
+  echo ""
+  echo "ERRO: o banco nao abriu -- parando aqui."
+  echo "      ORA-27104/ORA-00845 = limites de memoria x SGA do spfile."
+  echo "      Correcao e contexto: docs/TROUBLESHOOTING.pt-BR.md (ORA-27104)."
+  echo "ERROR: database did not open; see docs/TROUBLESHOOTING.md (ORA-27104)."
+  exit 1
+fi
 
 # Esperar o servico EBSDB aceitar conexao ANTES do adstrtal. Sem isso ele roda
 # na janela entre "banco aberto" e "servico registrado no listener", falha ao
