@@ -12,6 +12,38 @@ extrai, cria o container e sobe a pilha inteira.
 > E-Business Suite é software licenciado — o pacote é seu, e distribuí-lo é
 > responsabilidade sua sob a sua licença Oracle.
 
+## Os três comandos
+
+Tudo o que se faz aqui cabe em três, todos rodando direto da web, sem clone
+prévio, num PowerShell **como Administrador**:
+
+```powershell
+# 1. INSTALAR -- do zero até o EBS no ar
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
+    -BaseUrl 'https://pub-SEUHASH.r2.dev'
+
+# 2. RETOMAR -- continua de uma fase, sem refazer o que já ficou pronto
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
+    -BaseUrl 'https://pub-SEUHASH.r2.dev' -From Services
+
+# 3. REMOVER TUDO -- máquina, disco virtual, pacote, pasta e a linha do hosts
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
+```
+
+Os três mostram o andamento do mesmo jeito: **`passo N/X`** e uma barra de
+**0 a 100%**. O X é fixado antes de começar — as partes do pacote entram na
+conta — e a porcentagem pesa cada passo pelo tempo que ele costuma levar, então
+ela não anda igual para todo passo: download e extração valem quase dois terços
+da barra. O mesmo estado fica em `<TargetDir>\logs\progresso.json`, para
+consultar de outro terminal.
+
+```
+  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001
+```
+
+Detalhes de cada um: [instalar](#início-rápido) · [retomar](#retomando) ·
+[remover](#removendo).
+
 ## Requisitos
 
 | | Mínimo | Recomendado | Porquê |
@@ -159,6 +191,50 @@ dual filesystem, que aceita patches.
 | `AppsPassword` | senha do schema APPS (padrão `apps`) |
 | `AppsHost` | hostname gravado no contexto do EBS |
 | `TargetDir` | onde instalar |
+
+## Retomando
+
+**Reexecutar o mesmo comando é seguro.** As fases são idempotentes: cada uma
+confere se o trabalho já foi feito antes de refazer. Depois de uma falha — ou
+de um reinício do Windows no meio — repetir o comando é a primeira coisa a
+tentar, e nada do que já ficou pronto se perde.
+
+Para pular direto para uma fase, use `-From`:
+
+| Fase | O que faz | Retome por aqui quando |
+|---|---|---|
+| `Preflight` | WSL2 e plano de dimensionamento | — |
+| `Podman` | instala o Podman se faltar | "Podman instalado mas fora do PATH" |
+| `Machine` | cria a VM WSL2, move o disco, ajusta o kernel | depois de reiniciar por causa do erro 1223 ou `HCS_E_SERVICE_NOT_AVAILABLE` |
+| `Download` | baixa e confere o pacote dentro da VM | queda de rede, cota do Drive estourada |
+| `Extract` | extrai o `/u01` no ext4 da VM | depois de limpar uma instância anterior |
+| `Container` | carrega a imagem e cria o container | — |
+| `Services` | sobe banco, listener, WebLogic e o CM | **depois de reiniciar o Windows** |
+| `Verify` | confere HTTP, ICM e conteúdo do banco | só para reconferir |
+
+O que cada retomada preserva:
+
+- **Download.** A retomada é byte-exata (`curl -C -`) e cada parte é reconferida
+  por tamanho e SHA-256 contra o manifesto. Parte já íntegra é pulada em
+  segundos; só a que faltou ou veio corrompida é baixada de novo. Foi para isso
+  que o pacote é dividido em pedaços de 5 GB.
+- **Extract.** A extração **recusa** passar por cima de uma instância completa —
+  é uma trava proposital, e ela existe porque um deploy com o `-MachineName`
+  no padrão já começou a extrair sobre um `/u01` com o banco **aberto**. Sobra
+  de uma extração interrompida, essa sim, é limpa sozinha antes de recomeçar.
+- **Services.** Não depende de nada baixado: reaplica o nome canônico no
+  `/etc/hosts` do container, sobe o banco, espera o serviço realmente aceitar
+  conexão e só então chama o `adstrtal.sh`.
+
+Se a extração parar porque já existe uma instância completa, você tem três
+saídas — todas explicadas na própria mensagem de erro: usar `-MachineName` e
+`-TargetDir` diferentes para uma instância paralela; apagar só o `/u01` com
+`Remove-Instancia.ps1 -SomenteInstancia` e retomar com `-From Extract`,
+aproveitando os 59 GB já baixados; ou [remover tudo](#removendo).
+
+Para acompanhar de fora, sem atrapalhar: `<TargetDir>\logs\progresso.json` tem
+o passo e a porcentagem atuais, e `<TargetDir>\logs\*.log` tem a saída íntegra
+de cada fase longa (`download.log`, `extract.log`, `services.log`).
 
 ## Depois de reiniciar o Windows
 

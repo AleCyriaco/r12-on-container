@@ -12,6 +12,37 @@ extracts, creates the container and brings the whole stack up.
 > software — you supply your own package, and distributing it is your
 > responsibility under your Oracle licence.
 
+## The three commands
+
+Everything you do here fits in three, all runnable straight from the web with
+no prior clone, from a PowerShell running **as Administrator**:
+
+```powershell
+# 1. INSTALL -- from nothing to EBS up
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
+    -BaseUrl 'https://pub-YOURHASH.r2.dev'
+
+# 2. RESUME -- continue from a phase, without redoing what is already done
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
+    -BaseUrl 'https://pub-YOURHASH.r2.dev' -From Services
+
+# 3. REMOVE EVERYTHING -- machine, virtual disk, package, folder, hosts line
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
+```
+
+All three report progress the same way: **`step N/X`** plus a **0-100%** bar.
+X is fixed before anything starts — the package parts are counted in — and the
+percentage weights each step by how long it usually takes, so it deliberately
+does not advance evenly: download and extraction are worth nearly two thirds of
+the bar. The same state is written to `<TargetDir>\logs\progresso.json` for
+reading from another terminal.
+
+```
+  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001
+```
+
+Details: [install](#quick-start) · [resume](#resuming) · [remove](#removing).
+
 ## Requirements
 
 | | Minimum | Recommended | Why |
@@ -156,6 +187,51 @@ install.
 | `AppsPassword` | APPS schema password (defaults to `apps`) |
 | `AppsHost` | hostname baked into the EBS context |
 | `TargetDir` | where to install |
+
+## Resuming
+
+**Re-running the same command is safe.** The phases are idempotent: each one
+checks whether its work is already done before redoing it. After a failure — or
+a Windows reboot in the middle — repeating the command is the first thing to
+try, and nothing already finished is lost.
+
+To jump straight to a phase, use `-From`:
+
+| Phase | What it does | Resume here when |
+|---|---|---|
+| `Preflight` | WSL2 and the sizing plan | — |
+| `Podman` | installs Podman if missing | "Podman installed but not on PATH" |
+| `Machine` | creates the WSL2 VM, moves the disk, tunes the kernel | after rebooting for error 1223 or `HCS_E_SERVICE_NOT_AVAILABLE` |
+| `Download` | fetches and verifies the package inside the VM | network drop, Drive quota exceeded |
+| `Extract` | extracts `/u01` onto the VM's ext4 | after clearing a previous instance |
+| `Container` | loads the image and creates the container | — |
+| `Services` | starts database, listener, WebLogic and the CM | **after a Windows reboot** |
+| `Verify` | checks HTTP, ICM and database contents | to re-check only |
+
+What each resume preserves:
+
+- **Download.** Resumption is byte-exact (`curl -C -`) and every part is
+  re-checked by size and SHA-256 against the manifest. An intact part is skipped
+  in seconds; only the missing or corrupted one is fetched again. That is what
+  splitting the package into 5 GB parts buys you.
+- **Extract.** Extraction **refuses** to run over a complete instance — a
+  deliberate interlock, and it exists because a deploy launched with the default
+  `-MachineName` once started extracting over a `/u01` whose database was
+  **open**. Leftovers from an interrupted extraction, on the other hand, are
+  cleaned up automatically before restarting.
+- **Services.** Depends on nothing downloaded: it re-applies the canonical name
+  in the container's `/etc/hosts`, starts the database, waits for the service to
+  actually accept connections, and only then calls `adstrtal.sh`.
+
+If extraction stops because a complete instance already exists, you have three
+ways out — all spelled out in the error message itself: a different
+`-MachineName` and `-TargetDir` for a parallel instance; deleting only `/u01`
+with `Remove-Instancia.ps1 -SomenteInstancia` and resuming with `-From Extract`,
+reusing the 59 GB already downloaded; or [removing everything](#removing).
+
+To follow along from outside without interfering: `<TargetDir>\logs\progresso.json`
+holds the current step and percentage, and `<TargetDir>\logs\*.log` holds the
+full output of each long phase (`download.log`, `extract.log`, `services.log`).
 
 ## After a Windows reboot
 
