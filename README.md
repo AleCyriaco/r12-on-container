@@ -321,6 +321,14 @@ resource busy*; write in place with `cat > /etc/hosts`. And do not duplicate the
 IP's canonical name and the listener comes up on `HOST=apps` instead of the
 fully-qualified name the instance was built with.
 
+**A file named `NUL` in the instance folder makes it undeletable.** A
+`curl -o NUL` invoked from PowerShell does not discard output: it creates a
+real `NUL` file. From then on `<TargetDir>\NUL` resolves to the nul *device*,
+not the file, and deleting the folder fails with *"Incorrect function"* — a
+message that gives no hint of the cause. `Remove-Tudo.ps1` works around it with
+the `\\?\` prefix; by hand it is `cmd /c rd /s /q "\\?\<path>"`. For the same
+reason the deployment writes to a temp file instead of `-o NUL`.
+
 **`pkill -f tnslsnr` kills both listeners** — the database's on 1521 and the
 apps tier's on 1626 match the same pattern. Afterwards `adstrtal.sh` complains
 about APPS credentials, which points nowhere near the actual problem.

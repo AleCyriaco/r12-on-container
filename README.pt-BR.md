@@ -327,6 +327,14 @@ resource busy*; grave no lugar com `cat > /etc/hosts`. E não duplique os aliase
 canônico do IP e o listener sobe em `HOST=apps` em vez do nome completo com que
 a instância foi construída.
 
+**Um arquivo chamado `NUL` na pasta da instância a torna indelével.** Um
+`curl -o NUL` chamado do PowerShell não descarta a saída: cria um arquivo
+`NUL` de verdade. A partir daí `<TargetDir>\NUL` resolve para o *dispositivo*
+nul, não para o arquivo, e apagar a pasta falha com *"Incorrect function"* —
+mensagem que não dá nenhuma pista da causa. O `Remove-Tudo.ps1` contorna
+sozinho com o prefixo `\\?\`; na mão é `cmd /c rd /s /q "\\?\<caminho>"`.
+Pela mesma razão o deploy escreve num arquivo temporário em vez de `-o NUL`.
+
 **`pkill -f tnslsnr` derruba os dois listeners** — o do banco na 1521 e o do
 apps tier na 1626 casam com o mesmo padrão. Depois disso o `adstrtal.sh`
 reclama de credenciais do APPS, o que não aponta nem perto do problema real.

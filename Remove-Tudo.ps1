@@ -138,6 +138,57 @@ function ConvertTo-WslPath {
     return '/mnt/' + $drive + ($full.Substring(2) -replace '\\','/')
 }
 
+# Apagar a pasta da instancia falha de tres jeitos diferentes, e cada um pede
+# um remedio diferente. Todos ja aconteceram em campo:
+#
+#   1. "Incorrect function" -- sobrou um arquivo com NOME RESERVADO do DOS
+#      (NUL, CON, AUX, COM1...). Um "curl -o NUL" mal colocado cria um NUL de
+#      verdade na pasta, e a partir dai D:\...\NUL resolve para o DISPOSITIVO
+#      nul, nao para o arquivo: o Remove-Item nem enxerga o que precisa apagar.
+#      O prefixo \\?\ desliga essa traducao e o rd apaga.
+#   2. "used by another process" (erro 32) -- alguem esta DENTRO da pasta. O
+#      caso mais comum e o proprio terminal que rodou o script. Ninguem apaga
+#      o diretorio em que esta.
+#   3. ERROR_SHARING_VIOLATION no ext4.vhdx -- a VM utilitaria do WSL ainda
+#      segura o disco. Ai sim so derrubando o WSL inteiro.
+#
+# Deleting the instance folder fails in three different ways, each needing a
+# different fix, and all three have happened for real: a leftover DOS reserved
+# name (NUL) that only the \\?\ prefix can reach; the folder being the current
+# directory of the very shell running this; and the WSL utility VM still
+# holding the vhdx.
+function Remove-PastaInstancia {
+    param([Parameter(Mandatory)][string]$Caminho)
+
+    $full = [IO.Path]::GetFullPath($Caminho).TrimEnd('\')
+
+    # (2) sair de dentro dela antes de qualquer tentativa
+    $aqui = (Get-Location).Path
+    if ($aqui -eq $full -or $aqui.StartsWith("$full\", [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Info 'saindo da pasta antes de apagar (ninguem apaga o diretorio em que esta)'
+        Set-Location ([IO.Path]::GetPathRoot($full))
+    }
+
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+    try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop } catch { }
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+
+    # (1) nome reservado ou caminho longo demais: so o \\?\ alcanca
+    Write-Info 'sobrou algo que o caminho normal nao alcanca -- repetindo com o prefixo \\?\'
+    Invoke-Native { & cmd /c "rd /s /q ""\\?\$full""" } | Out-Null
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+
+    # (3) o disco virtual continua preso na VM utilitaria do WSL
+    Write-W 'ainda travada -- derrubando o WSL para soltar o disco virtual'
+    Write-W '(outras distros WSL desta maquina tambem param)'
+    & wsl --shutdown
+    Start-Sleep -Seconds 5
+    try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop } catch { }
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+    Invoke-Native { & cmd /c "rd /s /q ""\\?\$full""" } | Out-Null
+    return (-not (Test-Path -LiteralPath $full))
+}
+
 # ------------------------------------------------------------------- progresso
 #
 # Mesmo par de indicadores do Deploy-R12.ps1, pelo mesmo motivo: "passo N/X"
@@ -456,28 +507,26 @@ if ($pastaExiste) {
     } elseif (-not $marca) {
         Write-W "recusando apagar '$full': nao parece pasta de instancia (sem vm/logs/scripts/pkg)."
         Write-W 'apague na mao se for mesmo o que voce quer.'
+    } elseif (Remove-PastaInstancia $full) {
+        Write-Ok "removido ($pastaGb GB liberados)"
     } else {
-        try {
-            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
-            Write-Ok "removido ($pastaGb GB liberados)"
-        } catch {
-            # O vhdx fica travado enquanto a VM utilitaria do WSL estiver viva
-            # (ERROR_SHARING_VIOLATION). Derrubar o WSL inteiro e o unico jeito,
-            # e por isso nao e a primeira tentativa: para as outras distros junto.
-            # The vhdx stays locked while the WSL utility VM is alive; tearing
-            # WSL down is the only fix, which is why it is not the first try.
-            Write-W 'a pasta esta travada -- derrubando o WSL para soltar o disco'
-            Write-W '(outras distros WSL desta maquina tambem param)'
-            & wsl --shutdown
-            Start-Sleep -Seconds 5
-            try {
-                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
-                Write-Ok "removido ($pastaGb GB liberados)"
-            } catch {
-                Write-W "nao consegui apagar $full : $($_.Exception.Message)"
-                Write-W 'reinicie o Windows e apague a pasta na mao.'
-            }
+        # Chegando aqui, o espaco quase sempre JA voltou: o que resta e um
+        # esqueleto de pastas vazias preso por quem esta com ela aberta. Dizer
+        # "reinicie o Windows" seria despistar -- fechar o programa que segura
+        # a pasta resolve, e o proprio Explorer conta como programa.
+        # By this point the space is usually already back and what is left is
+        # an empty skeleton held open by something. Saying "reboot Windows"
+        # would misdirect: closing whatever holds the folder is the fix.
+        $sobrou = @(Invoke-Native { & cmd /c "dir /a /b ""\\?\$full""" })
+        Write-W "nao consegui apagar $full por inteiro."
+        if ($sobrou.Count -gt 0) {
+            Write-W "ainda ha $($sobrou.Count) item(ns) la dentro: $((@($sobrou) | Select-Object -First 5) -join ', ')"
+        } else {
+            Write-Info 'o conteudo saiu; sobrou so a pasta vazia'
         }
+        Write-W 'algum programa esta com a pasta aberta (um terminal, um editor,'
+        Write-W 'o Explorer). Feche-o e apague com:'
+        Write-Host "      cmd /c rd /s /q ""\\?\$full""" -ForegroundColor Yellow
     }
     Complete-Passo 'dir'
 }
