@@ -88,6 +88,25 @@ function Invoke-Native {
 }
 
 function Write-Step { param([string]$m) Write-Host "`n>>> $m" -ForegroundColor Cyan }
+
+# ------------------------------------------------------------------- progresso
+# O preparo tem 3 passos e vale os 3 primeiros por cento da barra. O Deploy-R12
+# recebe esses dois numeros (-PassosAntes / -PctAntes) e CONTINUA a contagem no
+# lugar de comecar outra: quem esta olhando ve "passo 4/28, 3%" logo depois de
+# "preparo 3/3", e nao um contador que zera no meio da instalacao.
+# The preparation has 3 steps worth the first 3% of the bar. Deploy-R12 gets
+# both numbers and CONTINUES the count instead of starting a second one.
+$script:PreparoTotal = 3
+$script:PreparoPct   = 3     # fatia da barra reservada ao preparo
+
+function Write-Preparo {
+    param([int]$N, [string]$Nome)
+    $pct   = [int][math]::Round($script:PreparoPct * $N / $script:PreparoTotal)
+    $cheio = [int][math]::Round($pct / 4.0)
+    $barra = ('#' * $cheio) + ('.' * (25 - $cheio))
+    Write-Host ('  [ preparo {0}/{1} ]  [{2,3}% ] [{3}]  {4}' -f `
+                $N, $script:PreparoTotal, $pct, $barra, $Nome) -ForegroundColor Cyan
+}
 # throw, nunca "exit": este script roda como scriptblock direto no console --
 # "exit" fecharia a janela do PowerShell levando a mensagem de erro junto.
 # throw, never "exit": this runs as a scriptblock right in the console --
@@ -104,6 +123,7 @@ Write-Host @'
 
 # ------------------------------------------------------------------------ git
 Write-Step 'Git'
+Write-Preparo 1 'Git: instalar, ou usar o que ja existe'
 if (Get-Command git -ErrorAction SilentlyContinue) {
     Write-Host "    $(git --version)"
 } else {
@@ -121,6 +141,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 
 # ----------------------------------------------------------------------- clone
 Write-Step 'Repositorio / Repository'
+Write-Preparo 2 'repositorio: clonar ou atualizar'
 if (Test-Path (Join-Path $CheckoutDir '.git')) {
     Write-Host "    ja clonado em $CheckoutDir -- atualizando / already cloned, updating"
     Invoke-Native { & git -C $CheckoutDir fetch --depth 1 origin $Ref }
@@ -147,6 +168,7 @@ $cfgFile = Join-Path $CheckoutDir 'config.psd1'
 
 # ---------------------------------------------------------------------- deploy
 Write-Step 'Deploy'
+Write-Preparo 3 'carregar o Deploy-R12.ps1'
 
 # Este proprio arquivo roda por scriptblock vindo da web, o que nao esbarra na
 # ExecutionPolicy -- mas invocar um .ps1 DE ARQUIVO esbarra. Liberamos so no
@@ -162,6 +184,9 @@ $argumentos = @{
     MachineName = $MachineName
     From        = $From
     ConfigFile  = $cfgFile      # sempre explicito: aqui nao ha $PSScriptRoot
+    # continua a contagem do preparo em vez de recomecar do zero
+    PassosAntes = $script:PreparoTotal
+    PctAntes    = $script:PreparoPct
 }
 # So repassa o TargetDir se foi realmente informado: passar vazio faria o
 # Deploy-R12.ps1 pensar que houve escolha explicita e pular a selecao de disco.

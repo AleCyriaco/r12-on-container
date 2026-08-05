@@ -16,6 +16,14 @@
       Services   sobe banco, listener e a pilha WebLogic
       Verify     confere HTTP 302/200, ICM e conteudo do banco
 
+    O andamento aparece em duas medidas na mesma linha: "passo N/X", com X
+    fixado antes de comecar (as partes do pacote entram na conta), e a
+    porcentagem geral de 0 a 100%, que pesa cada passo pelo tempo que ele
+    costuma levar -- download e extracao valem quase dois tercos da barra.
+    O mesmo estado fica em logs\progresso.json, para consultar de fora.
+    Progress shows as "step N/X" plus an overall 0-100% bar weighted by how
+    long each step usually takes; the same state is in logs\progresso.json.
+
 .PARAMETER BaseUrl
     RECOMENDADO. URL base de um bucket/host HTTP com as partes e o
     manifest.txt -- Cloudflare R2, S3, ou qualquer servidor com suporte a
@@ -98,6 +106,15 @@ param(
     [int]$SgaGb          = 0,
     [switch]$KeepFs2,
     [switch]$SkipHostsEntry,
+    # Passos ja concluidos por quem chamou (o bootstrap faz 3: Git, repositorio
+    # e carga do deploy) e a fatia da barra que eles ja consumiram. Servem para
+    # que a contagem "passo N/X" e a porcentagem sejam UNICAS do inicio ao fim,
+    # em vez de reiniciarem quando o bootstrap entrega o bastao.
+    # Steps already done by the caller (bootstrap does 3) and the slice of the
+    # bar they consumed, so "step N/X" and the percentage stay continuous
+    # across the bootstrap -> deploy handover instead of restarting.
+    [int]$PassosAntes    = 0,
+    [int]$PctAntes       = 0,
     [ValidateSet('All','Preflight','Podman','Machine','Download','Extract','Container','Services','Verify')]
     [string]$From        = 'All'
 )
@@ -179,6 +196,152 @@ function Write-Warn2 { param([string]$m) Write-Host "    AVISO: $m" -ForegroundC
 # closes taking the error message with it, looking like a crash.
 function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColor Red; throw "deploy interrompido: $m" }
 
+# ------------------------------------------------------------------- progresso
+#
+# Dois indicadores, sempre na mesma linha:
+#
+#   [ passo 12/28 ]  [ 41% ] [##########...............]  baixar u01-...part003
+#
+# O "passo N/X" responde "onde estou na lista"; a porcentagem responde "quanto
+# falta". Os dois sao necessarios porque nao sao a mesma coisa aqui: os passos
+# tem duracoes absurdamente diferentes -- conferir se o Podman ja existe leva
+# segundos, baixar 59 GB leva horas. Uma barra que andasse 1/28 por passo
+# ficaria em 20% durante metade da tarde. Por isso cada passo tem PESO, e a
+# porcentagem e peso concluido / peso total; nas partes do download o peso e o
+# proprio tamanho em GB, entao a barra anda proporcional ao que a rede entregou.
+#
+# Two indicators on one line: "step N/X" answers where we are in the list, the
+# percentage answers how much work is left. They are not the same thing here:
+# checking whether Podman exists takes seconds, downloading 59 GB takes hours.
+# So each step carries a WEIGHT and the percentage is done-weight / total, with
+# download parts weighted by their size in GB.
+$script:Plano       = New-Object Collections.Generic.List[object]
+$script:Idx         = -1      # indice 0-based do passo em execucao
+$script:PesoFeito   = 0.0
+$script:SubPct      = 0       # 0-100 DENTRO do passo atual
+$script:UltimaLinha = ''
+$script:PassosAntes = $PassosAntes
+$script:PctAntes    = $PctAntes
+
+function Add-Passo {
+    param([string]$Id, [string]$Nome, [double]$Peso = 1, [string]$Fase = '')
+    $script:Plano.Add([pscustomobject]@{
+        Id = $Id; Nome = $Nome; Peso = [double]$Peso; Fase = $Fase; Feito = $false })
+}
+
+function Get-PassoIdx {
+    param([string]$Id)
+    for ($k = 0; $k -lt $script:Plano.Count; $k++) {
+        if ($script:Plano[$k].Id -eq $Id) { return $k }
+    }
+    return -1
+}
+
+function Get-Pct {
+    $total = 0.0
+    foreach ($p in $script:Plano) { $total += $p.Peso }
+    if ($total -le 0) { return $script:PctAntes }
+    $feito = $script:PesoFeito
+    # so soma a fracao do passo atual se o peso dele ainda nao entrou no total
+    if ($script:Idx -ge 0 -and -not $script:Plano[$script:Idx].Feito) {
+        $feito += $script:Plano[$script:Idx].Peso * ($script:SubPct / 100.0)
+    }
+    $frac = $feito / $total
+    if ($frac -gt 1) { $frac = 1 }
+    return [int][math]::Floor($script:PctAntes + (100 - $script:PctAntes) * $frac)
+}
+
+# Deixa o progresso legivel por fora do console (o painel, um segundo terminal,
+# ou simplesmente quem voltou depois de horas e quer saber onde parou).
+function Save-Progresso {
+    param([int]$Pct, [int]$Passo, [int]$Total, [string]$Nome, [string]$Fase)
+    if (-not $script:LogsDir -or -not (Test-Path $script:LogsDir)) { return }
+    try {
+        $json = [pscustomobject]@{
+            pct = $Pct; passo = $Passo; total = $Total
+            nome = $Nome; fase = $Fase
+            quando = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $script:LogsDir 'progresso.json'), $json)
+    } catch { }   # status e conveniencia: nunca derrubar o deploy por causa dele
+}
+
+function Write-Status {
+    if ($script:Idx -lt 0) { return }
+    $p     = $script:Plano[$script:Idx]
+    $pct   = Get-Pct
+    $n     = $script:PassosAntes + $script:Idx + 1
+    $tot   = $script:PassosAntes + $script:Plano.Count
+    $cheio = [int][math]::Round($pct / 4.0)          # barra de 25 blocos
+    if ($cheio -gt 25) { $cheio = 25 }
+    $barra = ('#' * $cheio) + ('.' * (25 - $cheio))
+    $linha = '  [ passo {0}/{1} ]  [{2,3}% ] [{3}]  {4}' -f $n, $tot, $pct, $barra, $p.Nome
+    # So imprime quando a linha MUDA. O watcher chama isto a cada 15 s durante
+    # horas; repetir a mesma linha afogaria o log sem informar nada.
+    if ($linha -eq $script:UltimaLinha) { return }
+    $script:UltimaLinha = $linha
+    Write-Host $linha -ForegroundColor Cyan
+    Save-Progresso -Pct $pct -Passo $n -Total $tot -Nome $p.Nome -Fase $p.Fase
+}
+
+function Start-Passo {
+    param([string]$Id)
+    $i = Get-PassoIdx $Id
+    if ($i -lt 0) { return }        # passo de uma fase que nao esta no plano
+    # Fecha o que ficou para tras. Um passo pode ser pulado legitimamente (o
+    # arquivo ja estava baixado, a maquina ja existia) e ninguem sinaliza o fim
+    # dele -- sem isto o peso dele ficaria preso e a barra nunca chegaria a 100.
+    for ($k = 0; $k -lt $i; $k++) {
+        if (-not $script:Plano[$k].Feito) {
+            $script:PesoFeito += $script:Plano[$k].Peso
+            $script:Plano[$k].Feito = $true
+        }
+    }
+    $script:Idx    = $i
+    $script:SubPct = 0
+    Write-Status
+}
+
+function Set-PassoPct {
+    param([int]$Pct)
+    if ($script:Idx -lt 0) { return }
+    if ($Pct -lt 0) { $Pct = 0 }; if ($Pct -gt 99) { $Pct = 99 }
+    $script:SubPct = $Pct
+    Write-Status
+}
+
+function Complete-Passo {
+    param([string]$Id)
+    $i = $script:Idx
+    if ($Id) { $i = Get-PassoIdx $Id }
+    if ($i -lt 0) { return }
+    for ($k = 0; $k -le $i; $k++) {
+        if (-not $script:Plano[$k].Feito) {
+            $script:PesoFeito += $script:Plano[$k].Peso
+            $script:Plano[$k].Feito = $true
+        }
+    }
+    $script:Idx    = $i
+    $script:SubPct = 100
+    Write-Status
+}
+
+# Os scripts bash que rodam dentro da VM sinalizam progresso em linhas "@@":
+#   @@PASSO <id>   comecou o passo <id>
+#   @@PCT <0-100>  andou dentro do passo atual
+#   @@FEITO <id>   terminou o passo <id>
+# Elas sao controle, nao log: consumidas aqui e nunca ecoadas na tela.
+# The bash scripts inside the VM report progress via "@@" lines. They are
+# control, not log: consumed here and never echoed.
+function Test-Marcador {
+    param([string]$Linha)
+    if ("$Linha" -notmatch '^\s*@@') { return $false }
+    if     ("$Linha" -match '@@PASSO\s+(\S+)') { Start-Passo    $Matches[1] }
+    elseif ("$Linha" -match '@@PCT\s+(\d+)')   { Set-PassoPct   ([int]$Matches[1]) }
+    elseif ("$Linha" -match '@@FEITO\s+(\S+)') { Complete-Passo $Matches[1] }
+    return $true
+}
+
 # Executa um comando nativo com stderr redirecionado SEM o efeito colateral do
 # PowerShell 5.1: sob ErrorActionPreference=Stop, "2>&1"/"2>$null" em nativo
 # transforma cada linha de stderr em excecao. Aqui a preferencia e relaxada so
@@ -253,7 +416,7 @@ function Invoke-Vm {
     }
     $out = Invoke-Native { & podman machine ssh $MachineName "bash $wslPath" 2>&1 }
     if ($PassThru) { return $out }
-    $out | ForEach-Object { Write-Host "    $_" }
+    $out | ForEach-Object { if (-not (Test-Marcador $_)) { Write-Host "    $_" } }
 }
 
 # Acompanha um passo detached ate a sentinela .rc aparecer, ecoando o log.
@@ -270,7 +433,10 @@ function Wait-VmStep {
         if (Test-Path $logFile) {
             $lines = @(Get-Content $logFile -ErrorAction SilentlyContinue)
             if ($lines.Count -gt $shown) {
-                $novas = @($lines[$shown..($lines.Count-1)])
+                # os marcadores "@@" viram progresso e saem da lista; o resto
+                # segue para a tela como sempre
+                $novas = @($lines[$shown..($lines.Count-1)] |
+                           Where-Object { -not (Test-Marcador $_) })
                 # nunca inundar o console: rajadas grandes viram inicio + fim
                 if ($novas.Count -gt 40) {
                     $novas[0..4]                              | ForEach-Object { Write-Host "    $_" }
@@ -290,7 +456,8 @@ function Wait-VmStep {
             if (Test-Path $logFile) {
                 $lines = @(Get-Content $logFile -ErrorAction SilentlyContinue)
                 if ($lines.Count -gt $shown) {
-                    $lines[$shown..($lines.Count-1)] | ForEach-Object { Write-Host "    $_" }
+                    $lines[$shown..($lines.Count-1)] |
+                        ForEach-Object { if (-not (Test-Marcador $_)) { Write-Host "    $_" } }
                 }
             }
             if ($rc -ne '0') { Write-Warn2 "a fase '$Name' saiu com codigo $rc" }
@@ -392,6 +559,104 @@ function ConvertFrom-Manifest {
         }
     }
     return $entries
+}
+
+# Descobre O QUE sera baixado -- imagem, partes do volume, extras -- e devolve
+# a lista com tamanho e SHA de cada item.
+#
+# Roda cedo, na montagem do plano, e nao mais dentro da fase Download. Duas
+# razoes: a contagem "passo N/X" precisa saber quantas partes existem ANTES de
+# comecar (um total que muda no meio parece defeito), e um manifesto
+# inalcancavel passa a falhar em segundos, antes de instalar coisa alguma,
+# em vez de depois da maquina virtual criada.
+# Resolves WHAT will be downloaded -- image, volume parts, extras -- with size
+# and SHA for each. Runs early, while building the plan: the "step N/X" counter
+# must know the part count up front, and an unreachable manifest now fails in
+# seconds instead of after the VM is built.
+function Resolve-Pacote {
+    $itens = New-Object Collections.Generic.List[object]
+    function Novo-Item {
+        param([string]$Origem, [string]$Nome, [int64]$Tamanho, [string]$Sha)
+        [pscustomobject]@{ Origem = $Origem; Nome = $Nome; Tamanho = $Tamanho; Sha = $Sha }
+    }
+
+    if ($BaseUrl) {
+        # ---- HTTP simples (Cloudflare R2, S3, qualquer host com Range) ----
+        # Muito melhor que o Drive: sem cota, sem scraping de HTML, sem
+        # interstitial de virus, e a retomada do curl -C - e byte-exata.
+        $raiz = $BaseUrl.TrimEnd('/')
+        Write-Info "origem HTTP: $raiz"
+
+        $man = @{}
+        try {
+            $man = ConvertFrom-Manifest -Text (Get-HttpText "$raiz/manifest.txt")
+            Write-Ok "manifesto lido: $($man.Count) entradas"
+        } catch {
+            Write-Warn2 'sem manifest.txt acessivel: nao havera conferencia de SHA-256'
+        }
+
+        if ($man.Count -gt 0) {
+            $extra = @($man.Values | Where-Object { $_.Kind -eq 'EXTRA' })
+            $parts = @($man.Values | Where-Object { $_.Kind -eq 'PART'  } | Sort-Object Name)
+            foreach ($e in $extra) { $itens.Add((Novo-Item "$raiz/$($e.Name)" $e.Name $e.Size $e.Sha)) }
+            if ($parts.Count -gt 0) {
+                Write-Info "volume: $($parts.Count) partes"
+                foreach ($p in $parts) { $itens.Add((Novo-Item "$raiz/$($p.Name)" $p.Name $p.Size $p.Sha)) }
+            } else {
+                $f = @($man.Values | Where-Object { $_.Kind -eq 'FILE' })[0]
+                if (-not $f) { Die 'manifesto sem PART nem FILE' }
+                $itens.Add((Novo-Item "$raiz/$($f.Name)" $f.Name $f.Size $f.Sha))
+                Write-Info "volume: $($f.Name) (arquivo unico)"
+            }
+        } else {
+            # sem manifesto: nomes padrao do pacote, conferencia so pelo magic
+            $itens.Add((Novo-Item "$raiz/ebs-image-ol7-cll-ok.tar.zst" 'ebs-image-ol7-cll-ok.tar.zst' 0 '-'))
+            $itens.Add((Novo-Item "$raiz/u01-r12-lad-brasil.tar.zst"   'u01-r12-lad-brasil.tar.zst'   0 '-'))
+        }
+    }
+    elseif ($VolumeFileId -and $ImageFileId) {
+        $itens.Add((Novo-Item $ImageFileId  'ebs-image.tar.zst' 0 '-'))
+        $itens.Add((Novo-Item $VolumeFileId 'u01.tar.zst'       0 '-'))
+        Write-Warn2 'IDs passados na mao: sem manifesto, a conferencia fica so no magic number'
+    }
+    else {
+        if (-not $FolderUrl) { Die 'informe -BaseUrl, -FolderUrl, ou -VolumeFileId e -ImageFileId' }
+        $files = Get-GDriveFolderFiles -Url $FolderUrl
+
+        $man = @{}
+        $mf = $files | Where-Object { $_.Name -eq 'manifest.txt' } | Select-Object -First 1
+        if ($mf) {
+            $man = ConvertFrom-Manifest -Text (Get-GDriveTextFile -Id $mf.Id)
+            Write-Ok "manifesto lido: $($man.Count) entradas"
+        } else {
+            Write-Warn2 'sem manifest.txt na pasta: nao havera conferencia de SHA-256'
+        }
+
+        $img = $files | Where-Object { $_.Name -like '*image*.tar.zst' } | Select-Object -First 1
+        if (-not $img) { Die 'nao achei o *image*.tar.zst na pasta' }
+        $sz = 0; $sh = '-'
+        if ($man[$img.Name]) { $sz = $man[$img.Name].Size; $sh = $man[$img.Name].Sha }
+        $itens.Add((Novo-Item $img.Id $img.Name $sz $sh))
+        Write-Info "imagem: $($img.Name)"
+
+        $parts = @($files | Where-Object { $_.Name -match '\.part\d{3}$' } | Sort-Object Name)
+        if ($parts.Count -gt 0) {
+            Write-Info "volume: $($parts.Count) partes"
+            foreach ($p in $parts) {
+                $sz = 0; $sh = '-'
+                if ($man[$p.Name]) { $sz = $man[$p.Name].Size; $sh = $man[$p.Name].Sha }
+                $itens.Add((Novo-Item $p.Id $p.Name $sz $sh))
+            }
+        } else {
+            $vol = $files | Where-Object { $_.Name -like '*u01*.tar.zst' } | Select-Object -First 1
+            if (-not $vol) { Die 'nao achei nem partes (*.partNNN) nem *u01*.tar.zst na pasta' }
+            $sz = 0; $sh = '-'
+            if ($man[$vol.Name]) { $sz = $man[$vol.Name].Size; $sh = $man[$vol.Name].Sha }
+            $itens.Add((Novo-Item $vol.Id $vol.Name $sz $sh))
+            Write-Info "volume: $($vol.Name) (arquivo unico)"
+        }
+    }
+    return $itens
 }
 
 # ---------------------------------------------------------------------- inicio
@@ -572,9 +837,88 @@ $script:ScriptsDir = Join-Path $TargetDir 'scripts'
 $script:LogsDir    = Join-Path $TargetDir 'logs'
 New-Item -ItemType Directory -Force -Path $TargetDir, $script:ScriptsDir, $script:LogsDir | Out-Null
 
+# ======================================================================
+#  PLANO DE EXECUCAO
+#
+#  Monta a lista completa de passos ANTES de comecar, para que o "passo
+#  N/X" tenha um X fixo e a porcentagem seja calculavel do inicio ao fim.
+#  So entram as fases que vao mesmo rodar (-From recorta o plano), e as
+#  partes do download viram um passo cada -- por isso o pacote e
+#  resolvido aqui, e nao la na frente.
+#
+#  EXECUTION PLAN -- built up front so "step N/X" has a fixed X. Only
+#  phases that will actually run are included, and each download part is
+#  its own step, which is why the package is resolved here.
+# ======================================================================
+Write-Phase 'Plano / Plan'
+
+Add-Passo -Id 'req' -Nome 'requisitos: RAM, disco e virtualizacao' -Peso 1 -Fase 'Requisitos'
+
+if (Should-Run 'Preflight') {
+    Add-Passo -Id 'pf' -Nome 'preflight: WSL2 e dimensionamento' -Peso 2 -Fase 'Preflight'
+}
+if (Should-Run 'Podman') {
+    Add-Passo -Id 'pd' -Nome 'Podman: instalar, ou usar o que ja existe' -Peso 4 -Fase 'Podman'
+}
+if (Should-Run 'Machine') {
+    Add-Passo -Id 'mc:init'   -Nome 'maquina virtual: criar ou reaproveitar' -Peso 10 -Fase 'Machine'
+    Add-Passo -Id 'mc:start'  -Nome 'maquina virtual: iniciar'               -Peso 4  -Fase 'Machine'
+    Add-Passo -Id 'mc:sysctl' -Nome 'ajustes de kernel do Oracle'            -Peso 1  -Fase 'Machine'
+}
+
+# Peso do download e da extracao em GB: sao as duas fases que dominam o
+# relogio, e faze-las pesar o tamanho real e o que impede a barra de ficar
+# parada em 20% a tarde inteira.
+$gbPacote = 0
+if (Should-Run 'Download') {
+    $script:ListaDownload = @(Resolve-Pacote)
+    foreach ($it in $script:ListaDownload) {
+        # sem manifesto nao ha tamanho; 5 GB e o corte do Split-Package.ps1
+        $gb = 5
+        if ($it.Tamanho -gt 0) { $gb = [math]::Max(1, [math]::Round($it.Tamanho / 1GB)) }
+        $gbPacote += $gb
+        Add-Passo -Id "dl:$($it.Nome)" -Nome "baixar $($it.Nome)" -Peso $gb -Fase 'Download'
+    }
+}
+if (Should-Run 'Extract') {
+    $pesoTar = 60
+    if ($gbPacote -gt 0) { $pesoTar = $gbPacote }
+    Add-Passo -Id 'ex:probe' -Nome 'extracao: conferir o filesystem da VM' -Peso 1        -Fase 'Extract'
+    Add-Passo -Id 'ex:tar'   -Nome 'extrair o /u01 (274 GB de arquivos)'   -Peso $pesoTar -Fase 'Extract'
+    Add-Passo -Id 'ex:fim'   -Nome 'extracao: permissoes e conferencia'    -Peso 2        -Fase 'Extract'
+}
+if (Should-Run 'Container') {
+    Add-Passo -Id 'ct'       -Nome 'carregar a imagem e criar o container' -Peso 10 -Fase 'Container'
+    Add-Passo -Id 'ct:hosts' -Nome "hosts do Windows: $AppsHost"           -Peso 1  -Fase 'Container'
+}
+if (Should-Run 'Services') {
+    if ($SgaGb -gt 0) {
+        Add-Passo -Id 'sv:sga' -Nome "reduzir a SGA para ${SgaGb}G" -Peso 3 -Fase 'Services'
+    }
+    Add-Passo -Id 'sv:hosts' -Nome 'container: nome canonico no /etc/hosts' -Peso 1  -Fase 'Services'
+    Add-Passo -Id 'sv:db'    -Nome 'subir o banco e o listener'             -Peso 6  -Fase 'Services'
+    Add-Passo -Id 'sv:apps'  -Nome 'subir a pilha WebLogic (adstrtal)'      -Peso 10 -Fase 'Services'
+    Add-Passo -Id 'sv:cm'    -Nome 'subir o concurrent manager'             -Peso 4  -Fase 'Services'
+}
+if (Should-Run 'Verify') {
+    Add-Passo -Id 'vf:vm'     -Nome 'conferir servicos e banco'   -Peso 2 -Fase 'Verify'
+    Add-Passo -Id 'vf:http'   -Nome 'conferir HTTP pelo Windows'  -Peso 1 -Fase 'Verify'
+    Add-Passo -Id 'vf:painel' -Nome 'gerar o painel local'        -Peso 1 -Fase 'Verify'
+}
+
+$totalPassos = $script:PassosAntes + $script:Plano.Count
+Write-Info "$totalPassos passos no total (fases: $(($script:Plano | Select-Object -ExpandProperty Fase -Unique) -join ', '))"
+Write-Info 'a porcentagem pesa cada passo pelo tempo que ele costuma levar,'
+Write-Info 'entao ela NAO anda igual para todo passo -- download e extracao valem mais'
+
+# O portao de requisitos ja rodou; e o primeiro passo do plano e ele.
+Start-Passo 'req'
+Complete-Passo 'req'
+
 # ------------------------------------------------------------------- Preflight
 if (Should-Run 'Preflight') {
     Write-Phase 'Preflight'
+    Start-Passo 'pf'
 
     # RAM, disco e virtualizacao ja foram barrados no portao de requisitos
     # la em cima. Aqui ficam so o plano de dimensionamento e o que nao
@@ -652,11 +996,13 @@ if (Should-Run 'Preflight') {
         Die 'reinicio necessario apos instalar o WSL2'
     }
     Write-Ok 'WSL2 presente'
+    Complete-Passo 'pf'
 }
 
 # --------------------------------------------------------------------- Podman
 if (Should-Run 'Podman') {
     Write-Phase 'Podman'
+    Start-Passo 'pd'
 
     if (Get-Command podman -ErrorAction SilentlyContinue) {
         Write-Ok "ja instalado: $(& podman --version)"
@@ -679,11 +1025,13 @@ if (Should-Run 'Podman') {
         }
         Write-Ok "instalado: $(& podman --version)"
     }
+    Complete-Passo 'pd'
 }
 
 # -------------------------------------------------------------------- Machine
 if (Should-Run 'Machine') {
     Write-Phase 'Machine'
+    Start-Passo 'mc:init'
 
     $existing = @(Invoke-Native { & podman machine list --format '{{.Name}}' 2>$null })
     $vmDir    = Join-Path $TargetDir 'vm'
@@ -868,6 +1216,8 @@ if (Should-Run 'Machine') {
         }
         & podman machine set $MachineName --rootful | Out-Null
     }
+    Complete-Passo 'mc:init'
+    Start-Passo 'mc:start'
 
     $running = @(Invoke-Native { & podman machine list --format '{{.Name}} {{.LastUp}}' 2>$null }) |
                Where-Object { $_ -like "$MachineName*" -and $_ -like '*Currently running*' }
@@ -952,6 +1302,9 @@ if (Should-Run 'Machine') {
         }
     }
 
+    Complete-Passo 'mc:start'
+    Start-Passo 'mc:sysctl'
+
     # O WSL ignora parte do dimensionamento do podman: quem manda e o .wslconfig
     # global (padrao: metade da RAM do host). Conferir o que a VM REALMENTE tem.
     $vmInfo = Invoke-Vm -Name 'vm-info' -PassThru -Script @'
@@ -997,90 +1350,20 @@ sudo sysctl --system >/dev/null
 echo "shmmax = $(sysctl -n kernel.shmmax), shmall = $(sysctl -n kernel.shmall)"
 '@
     Invoke-Vm -Name 'sysctl' -Script $sysctlTpl
+    Complete-Passo 'mc:sysctl'
 }
 
 # ------------------------------------------------------------------- Download
 if (Should-Run 'Download') {
     Write-Phase 'Download'
 
-    # lista "id nome bytes sha256" do que baixar
-    # (com -BaseUrl o "id" e a URL completa; com Drive, o file id)
+    # lista "id nome bytes sha256" do que baixar, uma linha por arquivo
+    # (com -BaseUrl o "id" e a URL completa; com Drive, o file id).
+    # O QUE baixar ja foi resolvido na montagem do plano -- aqui so vira texto
+    # para o here-doc do bash.
     $baixar = New-Object Collections.Generic.List[string]
-
-    if ($BaseUrl) {
-        # ---- HTTP simples (Cloudflare R2, S3, qualquer host com Range) ----
-        # Muito melhor que o Drive: sem cota, sem scraping de HTML, sem
-        # interstitial de virus, e a retomada do curl -C - e byte-exata.
-        $raiz = $BaseUrl.TrimEnd('/')
-        Write-Info "origem HTTP: $raiz"
-
-        $man = @{}
-        try {
-            $man = ConvertFrom-Manifest -Text (Get-HttpText "$raiz/manifest.txt")
-            Write-Ok "manifesto lido: $($man.Count) entradas"
-        } catch {
-            Write-Warn2 'sem manifest.txt acessivel: nao havera conferencia de SHA-256'
-        }
-
-        if ($man.Count -gt 0) {
-            $extra = @($man.Values | Where-Object { $_.Kind -eq 'EXTRA' })
-            $parts = @($man.Values | Where-Object { $_.Kind -eq 'PART' } | Sort-Object Name)
-            foreach ($e in $extra) { $baixar.Add("$raiz/$($e.Name) $($e.Name) $($e.Size) $($e.Sha)") }
-            if ($parts.Count -gt 0) {
-                Write-Info "volume: $($parts.Count) partes"
-                foreach ($p in $parts) { $baixar.Add("$raiz/$($p.Name) $($p.Name) $($p.Size) $($p.Sha)") }
-            } else {
-                $f = @($man.Values | Where-Object { $_.Kind -eq 'FILE' })[0]
-                if (-not $f) { Die 'manifesto sem PART nem FILE' }
-                $baixar.Add("$raiz/$($f.Name) $($f.Name) $($f.Size) $($f.Sha)")
-                Write-Info "volume: $($f.Name) (arquivo unico)"
-            }
-        } else {
-            # sem manifesto: nomes padrao do pacote, conferencia so pelo magic
-            $baixar.Add("$raiz/ebs-image-ol7-cll-ok.tar.zst ebs-image-ol7-cll-ok.tar.zst 0 -")
-            $baixar.Add("$raiz/u01-r12-lad-brasil.tar.zst u01-r12-lad-brasil.tar.zst 0 -")
-        }
-    }
-    elseif ($VolumeFileId -and $ImageFileId) {
-        $baixar.Add("$ImageFileId ebs-image.tar.zst 0 -")
-        $baixar.Add("$VolumeFileId u01.tar.zst 0 -")
-        Write-Warn2 'IDs passados na mao: sem manifesto, a conferencia fica so no magic number'
-    } else {
-        if (-not $FolderUrl) { Die 'informe -FolderUrl, ou -VolumeFileId e -ImageFileId' }
-        $files = Get-GDriveFolderFiles -Url $FolderUrl
-
-        $man = @{}
-        $mf = $files | Where-Object { $_.Name -eq 'manifest.txt' } | Select-Object -First 1
-        if ($mf) {
-            $man = ConvertFrom-Manifest -Text (Get-GDriveTextFile -Id $mf.Id)
-            Write-Ok "manifesto lido: $($man.Count) entradas"
-        } else {
-            Write-Warn2 'sem manifest.txt na pasta: nao havera conferencia de SHA-256'
-        }
-
-        $img = $files | Where-Object { $_.Name -like '*image*.tar.zst' } | Select-Object -First 1
-        if (-not $img) { Die 'nao achei o *image*.tar.zst na pasta' }
-        $sz = 0; $sh = '-'
-        if ($man[$img.Name]) { $sz = $man[$img.Name].Size; $sh = $man[$img.Name].Sha }
-        $baixar.Add("$($img.Id) $($img.Name) $sz $sh")
-        Write-Info "imagem: $($img.Name)"
-
-        $parts = @($files | Where-Object { $_.Name -match '\.part\d{3}$' } | Sort-Object Name)
-        if ($parts.Count -gt 0) {
-            Write-Info "volume: $($parts.Count) partes"
-            foreach ($p in $parts) {
-                $sz = 0; $sh = '-'
-                if ($man[$p.Name]) { $sz = $man[$p.Name].Size; $sh = $man[$p.Name].Sha }
-                $baixar.Add("$($p.Id) $($p.Name) $sz $sh")
-            }
-        } else {
-            $vol = $files | Where-Object { $_.Name -like '*u01*.tar.zst' } | Select-Object -First 1
-            if (-not $vol) { Die 'nao achei nem partes (*.partNNN) nem *u01*.tar.zst na pasta' }
-            $sz = 0; $sh = '-'
-            if ($man[$vol.Name]) { $sz = $man[$vol.Name].Size; $sh = $man[$vol.Name].Sha }
-            $baixar.Add("$($vol.Id) $($vol.Name) $sz $sh")
-            Write-Info "volume: $($vol.Name) (arquivo unico)"
-        }
+    foreach ($it in $script:ListaDownload) {
+        $baixar.Add("$($it.Origem) $($it.Nome) $($it.Tamanho) $($it.Sha)")
     }
 
     Write-Info 'baixando para dentro da VM (ext4) -- pode levar horas'
@@ -1091,6 +1374,16 @@ if (Should-Run 'Download') {
 set -uo pipefail
 PKG=/var/ebs-pkg
 mkdir -p "$PKG"
+
+# Progresso para o lado Windows. As linhas "@@" nao aparecem na tela: quem esta
+# acompanhando as consome e transforma em "passo N/X" e porcentagem.
+# Progress for the Windows side. "@@" lines are consumed there, never printed.
+pct_parcial() {
+  local ARQ="$1" TOTAL="$2" ATUAL
+  [ "${TOTAL:-0}" = "0" ] && return 0
+  ATUAL=$(stat -c %s "$ARQ" 2>/dev/null || echo 0)
+  echo "@@PCT $(( ATUAL * 100 / TOTAL ))"
+}
 
 # O Drive intercala uma pagina de aviso de virus em arquivo grande. O fluxo e:
 # pegar a pagina, extrair os campos do formulario (confirm/uuid) e repetir.
@@ -1112,10 +1405,22 @@ gdrive_get() {
     curl -sS -L -C - -b "$CK" --retry 5 --retry-delay 10 --retry-all-errors \
          -o "$OUT" \
          "https://drive.usercontent.google.com/download?id=${ID}&export=download&confirm=${CONF}&uuid=${UUID}" &
-    local CPID=$!
+    local CPID=$! VOLTA=0
+    # Fatias de 10 s, mas UMA linha por minuto: o @@PCT alimenta a barra em
+    # tempo real sem inchar o log, e um arquivo que baixa rapido nao fica
+    # esperando o resto do minuto para o laco perceber que acabou.
+    # 10 s slices, one printed line per minute: the bar stays live without
+    # bloating the log, and a fast file does not idle out the rest of a minute.
     while kill -0 $CPID 2>/dev/null; do
-      sleep 60
-      kill -0 $CPID 2>/dev/null && echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $(basename "$OUT")"
+      sleep 10
+      kill -0 $CPID 2>/dev/null || break
+      VOLTA=$((VOLTA + 1))
+      # progresso dentro do passo. $SIZE e local da funcao chamadora: em bash
+      # o escopo e dinamico, entao ele esta visivel aqui.
+      pct_parcial "$OUT" "${SIZE:-0}"
+      if [ $((VOLTA % 6)) -eq 0 ]; then
+        echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $(basename "$OUT")"
+      fi
     done
     wait $CPID
   else
@@ -1140,14 +1445,19 @@ magic_ok() {
 baixa() {
   local ID="$1" NAME="$2" SIZE="$3" SHA="$4"
   local OUT="$PKG/$NAME"
-  local tent atual h
+  local tent atual h CPID VOLTA
 
+  echo "@@PASSO dl:$NAME"
   for tent in 1 2; do
     if [ -s "$OUT" ] && [ "$SIZE" != "0" ]; then
       atual=$(stat -c %s "$OUT")
       if [ "$atual" = "$SIZE" ]; then
         h=$(sha256sum "$OUT" | cut -d' ' -f1)
-        if [ "$h" = "$SHA" ]; then echo "    $NAME: ja baixado e conferido"; return 0; fi
+        if [ "$h" = "$SHA" ]; then
+          echo "    $NAME: ja baixado e conferido"
+          echo "@@FEITO dl:$NAME"
+          return 0
+        fi
         echo "    $NAME: sha divergente -- refazendo"
       fi
       rm -f "$OUT"
@@ -1160,10 +1470,15 @@ baixa() {
         # interstitial. E o caminho bom; o do Drive abaixo e o contorno.
         curl -sS -L -C - --retry 5 --retry-delay 10 --retry-all-errors \
              -o "$OUT" "$ID" &
-        CPID=$!
+        CPID=$!; VOLTA=0
         while kill -0 $CPID 2>/dev/null; do
-          sleep 60
-          kill -0 $CPID 2>/dev/null && echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $NAME"
+          sleep 10
+          kill -0 $CPID 2>/dev/null || break
+          VOLTA=$((VOLTA + 1))
+          pct_parcial "$OUT" "$SIZE"
+          if [ $((VOLTA % 6)) -eq 0 ]; then
+            echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $NAME"
+          fi
         done
         wait $CPID
         ;;
@@ -1202,12 +1517,14 @@ baixa() {
         rm -f "$OUT"; continue
       fi
       echo "    $NAME OK ($(du -h "$OUT" | cut -f1), sha conferido)"
+      echo "@@FEITO dl:$NAME"
       return 0
     else
       case "$NAME" in
         *.part000|*.tar.zst) magic_ok "$OUT" || { rm -f "$OUT"; continue; } ;;
       esac
       echo "    $NAME OK ($(du -h "$OUT" | cut -f1), sem sha)"
+      echo "@@FEITO dl:$NAME"
       return 0
     fi
   done
@@ -1307,6 +1624,7 @@ fi
 # erro aparece disfarcado (FRM-40735, ORA-12154 em tnsnames valido...). No ext4
 # da VM o teto e proporcional ao filesystem e fica muito abaixo disso, mas
 # conferir custa nada.
+echo "@@PASSO ex:probe"
 echo "[*] inode de teste"
 touch "$MNT/.probe"; INO=$(stat -c %i "$MNT/.probe"); rm -f "$MNT/.probe"
 echo "    $INO (limite 4294967295)"
@@ -1320,19 +1638,54 @@ if [ -d "$MNT/install" ]; then
 fi
 rm -f "$MNT/.deploy-complete"
 
+echo "@@PASSO ex:tar"
 echo "[*] extraindo -- demora"
 date +'    inicio: %H:%M:%S'
+USADO0=$(df -B1 --output=used "$MNT" | tail -1 | tr -dc '0-9')
+ESPERADO=__ESPERADO__
 # Com partes, reassembla por STREAMING: o cat alimenta o zstd direto, sem nunca
 # gravar os 58 GB juntos em disco. O zero a esquerda (.part000) faz o glob do
 # shell ordenar certo.
 if ls "$PKG"/*.part000 >/dev/null 2>&1; then
   echo "    reassemblando $(ls "$PKG"/*.part[0-9][0-9][0-9] | wc -l) partes por streaming"
-  cat "$PKG"/*.part[0-9][0-9][0-9] | zstd -dc | tar -xf - -C "$MNT" __EXCL__
+  ( cat "$PKG"/*.part[0-9][0-9][0-9] | zstd -dc | tar -xf - -C "$MNT" __EXCL__ ) &
 else
-  zstd -dc "$PKG"/u01*.tar.zst | tar -xf - -C "$MNT" __EXCL__
+  ( zstd -dc "$PKG"/u01*.tar.zst | tar -xf - -C "$MNT" __EXCL__ ) &
 fi
+TPID=$!
+# Progresso pelo quanto o filesystem ENGORDOU. O tar nao tem como dizer o que
+# falta quando le de um pipe -- nao existe catalogo antes de ler tudo -- e o df
+# e a unica medida barata que anda no mesmo ritmo da extracao. O -ESPERADO- vem
+# do lado Windows (274 GB com fs2, ~237 GB sem), entao e estimativa: o passo so
+# fecha em 100% quando o tar termina de verdade, nunca pela conta.
+# Progress from filesystem growth: tar cannot report what is left when reading
+# from a pipe, and df is the only cheap measure that tracks the extraction. The
+# expected size is an estimate; the step only closes at 100% when tar actually
+# finishes, never from the arithmetic.
+VOLTA=0
+while kill -0 $TPID 2>/dev/null; do
+  sleep 15
+  kill -0 $TPID 2>/dev/null || break
+  VOLTA=$(( VOLTA + 1 ))
+  USADO=$(df -B1 --output=used "$MNT" | tail -1 | tr -dc '0-9')
+  ESCRITO=$(( USADO - USADO0 ))
+  [ "$ESCRITO" -lt 0 ] && ESCRITO=0
+  echo "@@PCT $(( ESCRITO * 100 / ESPERADO ))"
+  # uma linha por minuto na tela; a barra anda a cada 15 s
+  if [ $(( VOLTA % 4 )) -eq 0 ]; then
+    echo "    ... $(( ESCRITO / 1073741824 )) GB de ~$(( ESPERADO / 1073741824 )) GB"
+  fi
+done
+# O subshell em segundo plano herda o pipefail, entao este codigo de saida e o
+# do pior comando do pipe (cat/zstd/tar) -- nao so o do ultimo.
+wait $TPID; RC=$?
 date +'    fim: %H:%M:%S'
+if [ "$RC" -ne 0 ]; then
+  echo "ERRO: a extracao terminou com codigo $RC (disco cheio? parte corrompida?)"
+  exit 1
+fi
 
+echo "@@PASSO ex:fim"
 [ -d "$MNT/install/APPS" ] || { echo "ERRO: extracao nao produziu install/APPS"; exit 1; }
 chown -R 54321:54321 "$MNT/install" 2>/dev/null || true
 
@@ -1345,10 +1698,17 @@ echo "[*] filesystems presentes"
 ls -d "$MNT"/install/APPS/fs* 2>/dev/null
 
 echo "[*] extracao OK"
+echo "@@FEITO ex:fim"
 df -h "$MNT" | tail -1
 '@
 
-    Invoke-Vm -Name 'extract' -Detached -Script $exTpl.Replace('__EXCL__', $excl)
+    # Tamanho esperado do que sera gravado, so para a porcentagem: o pacote
+    # rende ~274 GB com o fs2 e ~237 GB sem ele.
+    $espBytes = [int64]237 * 1GB
+    if ($KeepFs2) { $espBytes = [int64]274 * 1GB }
+
+    Invoke-Vm -Name 'extract' -Detached -Script `
+        $exTpl.Replace('__EXCL__', $excl).Replace('__ESPERADO__', "$espBytes")
     $null = Wait-VmStep -Name 'extract' -TimeoutMin 360
 
     $exLog = Get-Content (Join-Path $script:LogsDir 'extract.log') -Raw
@@ -1359,6 +1719,7 @@ df -h "$MNT" | tail -1
 # ------------------------------------------------------------------ Container
 if (Should-Run 'Container') {
     Write-Phase 'Container'
+    Start-Passo 'ct'
 
     $ctTpl = @'
 #!/bin/bash
@@ -1408,6 +1769,8 @@ podman exec "$CTR" bash -lc 'getent hosts __APPSHOST__'
 
     Invoke-Vm -Name 'container' -Script $ctTpl.Replace('__APPSHOST__', $AppsHost)
     Write-Ok 'container criado'
+    Complete-Passo 'ct'
+    Start-Passo 'ct:hosts'
 
     # hosts do Windows: sem isso o login falha, porque o AppsLogin redireciona
     # para o hostname e o EBS o grava no contexto e nos perfis.
@@ -1425,6 +1788,7 @@ podman exec "$CTR" bash -lc 'getent hosts __APPSHOST__'
             Write-Host "      Add-Content '$hostsFile' `"`n$entry`"" -ForegroundColor Yellow
         }
     }
+    Complete-Passo 'ct:hosts'
 }
 
 # ------------------------------------------------------------------- Services
@@ -1432,6 +1796,7 @@ if (Should-Run 'Services') {
     Write-Phase 'Services'
 
     if ($SgaGb -gt 0) {
+        Start-Passo 'sv:sga'
         Write-Info "reduzindo a SGA para $SgaGb GB antes do primeiro startup"
         $sgaMax = $SgaGb + 2
         $pga    = [math]::Max(2, [int]($SgaGb/4))
@@ -1493,6 +1858,7 @@ echo "[*] reducao de SGA OK"
             $sgaTpl.Replace('__SGA__',"$SgaGb").Replace('__SGAMAX__',"$sgaMax").Replace('__PGA__',"$pga"))
         $sgaOut | ForEach-Object { Write-Host "    $_" }
         if (($sgaOut -join "`n") -match 'ERRO:') { Die 'a reducao de SGA falhou; veja a saida acima' }
+        Complete-Passo 'sv:sga'
     }
 
     if (-not $WlsPassword) {
@@ -1514,6 +1880,7 @@ CTR=ebs
 # podman REGENERATES /etc/hosts on every container start; without re-applying
 # the canonical-name line the database is unreachable and adstrtal blames the
 # credentials for what is a name-resolution problem.
+echo "@@PASSO sv:hosts"
 echo "[*] reaplicando o nome canonico no /etc/hosts"
 IP=$(podman inspect "$CTR" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 podman exec -i "$CTR" bash -s <<EOF
@@ -1522,6 +1889,7 @@ printf '%s\t%s apps ebs\n' '$IP' '__APPSHOST__' >> /tmp/h
 cat /tmp/h > /etc/hosts
 EOF
 
+echo "@@PASSO sv:db"
 echo "[*] banco + listener"
 # stop+start: se o listener subiu antes da correcao do /etc/hosts esta com o
 # binding errado. Sempre "lsnrctl stop" no ORACLE_HOME certo, nunca
@@ -1559,9 +1927,12 @@ SQL
 for i in $(seq 1 30); do
   if db_pronto; then echo "    disponivel apos $((i*5))s"; break; fi
   [ "$i" = "30" ] && echo "    AVISO: sem resposta em 150s -- seguindo assim mesmo"
+  echo "@@PCT $(( i * 100 / 30 ))"
   sleep 5
 done
+echo "@@FEITO sv:db"
 
+echo "@@PASSO sv:apps"
 echo "[*] pilha de aplicacao"
 # adstrtal.sh pede a senha do WebLogic NO STDIN. Sem "podman exec -i" ela chega
 # vazia, o AdminServer falha com status 1 e todos os managed servers sao pulados
@@ -1575,6 +1946,9 @@ printf '%s\n' '__WLSPWD__' | podman exec -i -u oracle "$CTR" bash -lc '
 # O ICM as vezes perde a corrida com o lock da sessao anterior e morre com
 # "FND_DCP.Request_Session_Lock ... result code of 1 / establish_icm failed".
 # Nao e corrupcao e nao precisa de cmclean.sql: basta subir de novo.
+echo "@@FEITO sv:apps"
+
+echo "@@PASSO sv:cm"
 echo "[*] concurrent manager"
 CM=$(podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/EBSapps.env run >/dev/null 2>&1
@@ -1590,6 +1964,7 @@ if ! echo "$CM" | grep -qi "is Active"; then
 fi
 
 echo "[*] services OK"
+echo "@@FEITO sv:cm"
 '@
 
     Invoke-Vm -Name 'services' -Detached -Script `
@@ -1602,6 +1977,7 @@ echo "[*] services OK"
 # --------------------------------------------------------------------- Verify
 if (Should-Run 'Verify') {
     Write-Phase 'Verify'
+    Start-Passo 'vf:vm'
 
     $vfTpl = @'
 #!/bin/bash
@@ -1636,6 +2012,9 @@ df -h /var/ebs-u01 | tail -1
     Invoke-Vm -Name 'verify' -Script `
         $vfTpl.Replace('__APPSHOST__', $AppsHost).Replace('__APPSPWD__', $AppsPassword)
 
+    Complete-Passo 'vf:vm'
+    Start-Passo 'vf:http'
+
     Write-Host "`n-- HTTP a partir do Windows --" -ForegroundColor Cyan
     # "-o NUL" nao vale aqui: chamado pelo PowerShell, o curl.exe cria um
     # ARQUIVO chamado NUL no diretorio atual em vez de descartar a saida.
@@ -1646,6 +2025,8 @@ df -h /var/ebs-u01 | tail -1
         Write-Info ('{0,-52} -> {1}' -f $u, $code)
     }
     Remove-Item $lixo -ErrorAction SilentlyContinue
+    Complete-Passo 'vf:http'
+    Start-Passo 'vf:painel'
 
     # Painel local com credenciais e atalhos. Gerado aqui, nunca commitado:
     # carrega todas as senhas em texto puro e este repositorio e publico.
@@ -1670,6 +2051,7 @@ df -h /var/ebs-u01 | tail -1
             Write-Warn2 "nao consegui gerar o painel: $($_.Exception.Message)"
         }
     }
+    Complete-Passo 'vf:painel'
 
     Write-Host @"
 
@@ -1686,4 +2068,16 @@ df -h /var/ebs-u01 | tail -1
       .\Deploy-R12.ps1 -From Services -TargetDir '$TargetDir'
 
 "@ -ForegroundColor White
+}
+
+# ------------------------------------------------------------------------ fim
+# Fecha o ultimo passo e crava os 100%. Sem isto, uma execucao com -From
+# parcial terminaria mostrando algo como 87% -- correto pelo peso, mas
+# confuso: para quem rodou, o trabalho pedido acabou.
+# Closes the last step at 100%: a partial -From run would otherwise end at
+# something like 87%, arithmetically right but confusing.
+if ($script:Plano.Count -gt 0) {
+    Complete-Passo $script:Plano[$script:Plano.Count - 1].Id
+    Write-Host ''
+    Write-Ok ("concluido: {0} passos, 100%" -f ($script:PassosAntes + $script:Plano.Count))
 }
