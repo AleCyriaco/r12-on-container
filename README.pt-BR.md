@@ -185,6 +185,36 @@ sobem a pilha de aplicação e conferem o concurrent manager. Pular qualquer um
 desses passos vira um enganoso *"APPS credentials are wrong"* — veja
 [docs/TROUBLESHOOTING.pt-BR.md](docs/TROUBLESHOOTING.pt-BR.md#tudo-quebra-depois-de-reiniciar-o-container).
 
+## Removendo
+
+Dois scripts, com propósitos diferentes:
+
+```powershell
+# apaga TUDO: serviços, container, máquina, disco virtual, pacote de 59 GB,
+# a pasta da instância e a linha que o deploy escreveu no hosts
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
+
+# apaga só o /u01 extraído, preservando a máquina e o pacote já baixado
+.\Remove-Instancia.ps1 -SomenteInstancia
+```
+
+O `Remove-Tudo.ps1` primeiro **olha** — descobre a pasta da instância pelo
+registro do WSL (não precisa de `-TargetDir`), lista o que encontrou, monta o
+plano com o que existe de fato e mostra `passo N/X` mais a barra de 0 a 100%,
+igual ao deploy. Nada é alterado antes de você digitar o nome da máquina para
+confirmar. Sem um console para responder — um pipe, um `< NUL`, uma tarefa
+agendada — ele **para** em vez de assumir que pode apagar; use `-Force` se é
+isso mesmo que você quer.
+
+Duas coisas que ele recusa a fazer: apagar uma pasta que não tenha cara de
+instância (sem `vm/logs/scripts/pkg`) ou a raiz de um drive; e remover do
+`hosts` qualquer linha que não seja exatamente a `127.0.0.1 <AppsHost>` que o
+deploy escreveu — uma entrada sua apontando o mesmo nome para outro servidor
+fica onde está, e o script diz que a manteve.
+
+Por padrão ele preserva o clone do repositório e o `.wslconfig`; use
+`-RemoverRepo` e `-RestaurarWslConfig` para levar esses também.
+
 ## Hostname
 
 O `AppsLogin` redireciona para o hostname que o EBS gravou no contexto e nos

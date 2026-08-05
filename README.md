@@ -183,6 +183,34 @@ manager. Skipping any of those turns into a misleading *"APPS credentials are
 wrong"* — see
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#everything-breaks-after-restarting-the-container).
 
+## Removing
+
+Two scripts, for different jobs:
+
+```powershell
+# removes EVERYTHING: services, container, machine, virtual disk, the 59 GB
+# package, the instance folder and the hosts line the deployment wrote
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
+
+# removes only the extracted /u01, keeping the machine and the package
+.\Remove-Instancia.ps1 -SomenteInstancia
+```
+
+`Remove-Tudo.ps1` looks before it touches: it finds the instance folder from
+the WSL registration (no `-TargetDir` needed), lists what it found, builds the
+plan from what actually exists, and reports `step N/X` plus a 0-100% bar just
+like the deployment. Nothing changes until you type the machine name to
+confirm. With no console to answer — a pipe, a `< NUL`, a scheduled task — it
+**stops** instead of assuming consent; pass `-Force` if that is what you mean.
+
+Two things it refuses to do: delete a folder that does not look like an
+instance (no `vm/logs/scripts/pkg`) or a drive root; and remove any `hosts`
+line other than the exact `127.0.0.1 <AppsHost>` the deployment wrote — your
+own entry pointing that name elsewhere stays, and the script says so.
+
+It keeps the repository clone and `.wslconfig` by default; `-RemoverRepo` and
+`-RestaurarWslConfig` take those too.
+
 ## Hostname
 
 `AppsLogin` redirects to the hostname EBS wrote into its context and profiles,
