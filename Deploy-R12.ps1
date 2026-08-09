@@ -222,17 +222,26 @@ function Die         { param([string]$m) Write-Host "`nERRO: $m" -ForegroundColo
 # download parts weighted by their size in GB.
 $script:Plano       = New-Object Collections.Generic.List[object]
 $script:Idx         = -1      # indice 0-based do passo em execucao
-$script:PesoFeito   = 0.0
+$script:SegFeito    = 0.0     # segundos NOMINAIS ja concluidos
 $script:SubPct      = 0       # 0-100 DENTRO do passo atual
 $script:UltimaLinha = ''
 $script:PassosAntes = $PassosAntes
 $script:PctAntes    = $PctAntes
 $script:Inicio      = Get-Date   # base do "decorrido"; ETA usa o ritmo DESTE run, nao desde 0%
 
+# O peso de cada passo E o tempo que ele costuma levar, em segundos. Ja foi
+# "esforco" (GB, unidades arbitrarias) e isso quebrava a previsao: os 21 pontos
+# de peso das fases iniciais passavam em 29 s, os 158 restantes levavam horas,
+# e extrapolar linearmente em cima disso dava "faltam 5 minutos" para um deploy
+# de tres horas. Com o peso EM SEGUNDOS a barra e a previsao viram a mesma
+# conta, e as duas ficam honestas.
+# Each step's weight IS its typical duration in seconds. It used to be "effort"
+# (GB, arbitrary units), which made the forecast meaningless: the early phases
+# burned 12% of the bar in 29 seconds while the rest took hours.
 function Add-Passo {
-    param([string]$Id, [string]$Nome, [double]$Peso = 1, [string]$Fase = '')
+    param([string]$Id, [string]$Nome, [double]$Seg = 30, [string]$Fase = '')
     $script:Plano.Add([pscustomobject]@{
-        Id = $Id; Nome = $Nome; Peso = [double]$Peso; Fase = $Fase; Feito = $false })
+        Id = $Id; Nome = $Nome; Seg = [double]$Seg; Fase = $Fase; Feito = $false })
 }
 
 function Get-PassoIdx {
@@ -243,30 +252,57 @@ function Get-PassoIdx {
     return -1
 }
 
-function Get-Pct {
+function Get-SegTotal {
     $total = 0.0
-    foreach ($p in $script:Plano) { $total += $p.Peso }
-    if ($total -le 0) { return $script:PctAntes }
-    $feito = $script:PesoFeito
-    # so soma a fracao do passo atual se o peso dele ainda nao entrou no total
+    foreach ($p in $script:Plano) { $total += $p.Seg }
+    return $total
+}
+
+function Get-SegFeito {
+    $feito = $script:SegFeito
+    # so soma a fracao do passo atual se ele ainda nao entrou no acumulado
     if ($script:Idx -ge 0 -and -not $script:Plano[$script:Idx].Feito) {
-        $feito += $script:Plano[$script:Idx].Peso * ($script:SubPct / 100.0)
+        $feito += $script:Plano[$script:Idx].Seg * ($script:SubPct / 100.0)
     }
-    $frac = $feito / $total
+    return $feito
+}
+
+function Get-Pct {
+    $total = Get-SegTotal
+    if ($total -le 0) { return $script:PctAntes }
+    $frac = (Get-SegFeito) / $total
     if ($frac -gt 1) { $frac = 1 }
     return [int][math]::Floor($script:PctAntes + (100 - $script:PctAntes) * $frac)
+}
+
+# Quanto falta ate o FIM DE TUDO, em segundos de relogio.
+#
+# cyrix: soma nominal pura, sem corrigir pelo ritmo observado. Corrigir parece
+# obvio e e uma armadilha: o ritmo das fases iniciais nao prediz o do download.
+# Numa maquina que reaproveita a VM, os primeiros passos passam em segundos, o
+# fator despenca e a estimativa do deploy inteiro cai junto -- que e exatamente
+# o bug de "faltam 5 minutos" que esta conta veio consertar. O nominal ja escala
+# com o tamanho do pacote, que e a variavel que mais pesa.
+# Teto conhecido: banda muito fora dos 80 Mbps assumidos erra o total (para mais
+# ou para menos) enquanto o download nao termina. Se isso incomodar, o upgrade e
+# medir bytes/s durante a fase Download e reescalar SO os passos dl: restantes.
+function Get-Restante {
+    $resta = (Get-SegTotal) - (Get-SegFeito)
+    if ($resta -lt 0) { $resta = 0 }
+    return [timespan]::FromSeconds([math]::Round($resta))
 }
 
 # Deixa o progresso legivel por fora do console (o painel, um segundo terminal,
 # ou simplesmente quem voltou depois de horas e quer saber onde parou).
 function Save-Progresso {
-    param([int]$Pct, [int]$Passo, [int]$Total, [string]$Nome, [string]$Fase, [string]$Decorrido, [string]$Eta)
+    param([int]$Pct, [int]$Passo, [int]$Total, [string]$Nome, [string]$Fase,
+          [string]$Decorrido, [string]$Falta, [string]$TotalTempo)
     if (-not $script:LogsDir -or -not (Test-Path $script:LogsDir)) { return }
     try {
         $json = [pscustomobject]@{
             pct = $Pct; passo = $Passo; total = $Total
             nome = $Nome; fase = $Fase
-            decorrido = $Decorrido; eta = $Eta
+            decorrido = $Decorrido; falta = $Falta; tempo_total = $TotalTempo
             quando = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         } | ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $script:LogsDir 'progresso.json'), $json)
@@ -288,25 +324,21 @@ function Write-Status {
     $cheio     = [int][math]::Round($pct / 4.0)          # barra de 25 blocos
     if ($cheio -gt 25) { $cheio = 25 }
     $barra     = ('#' * $cheio) + ('.' * (25 - $cheio))
-    $decorrido = (Get-Date) - $script:Inicio
-    # Ritmo DESTE run, nao desde 0%: numa retomada o -PctAntes ja vem alto e
-    # dividir pelo pct cheio faria o deploy parecer muito mais rapido do que e.
-    $feitoAgora = $pct - $script:PctAntes
-    $etaTxt = '?'
-    if ($pct -ge 100) {
-        $etaTxt = '0:00:00'
-    } elseif ($feitoAgora -gt 0) {
-        $faltaTicks = [long]($decorrido.Ticks / $feitoAgora * (100 - $pct))
-        $etaTxt = Format-Duracao ([timespan]::FromTicks($faltaTicks))
-    }
+    $decorrido    = (Get-Date) - $script:Inicio
+    $restante     = Get-Restante
     $decorridoTxt = Format-Duracao $decorrido
-    $linha = '  [ passo {0}/{1} ]  [{2,3}% ] [{3}]  {4}  (decorrido {5} | previsto {6})' -f $n, $tot, $pct, $barra, $p.Nome, $decorridoTxt, $etaTxt
+    $restanteTxt  = Format-Duracao $restante
+    # "total" e o deploy inteiro ate o fim de tudo, nao so o que falta
+    $totalTxt     = Format-Duracao ($decorrido + $restante)
+    $linha = '  [ passo {0}/{1} ]  [{2,3}% ] [{3}]  {4}  (decorrido {5} | falta {6} | total {7})' -f `
+             $n, $tot, $pct, $barra, $p.Nome, $decorridoTxt, $restanteTxt, $totalTxt
     # So imprime quando a linha MUDA. O watcher chama isto a cada 15 s durante
     # horas; repetir a mesma linha afogaria o log sem informar nada.
     if ($linha -eq $script:UltimaLinha) { return }
     $script:UltimaLinha = $linha
     Write-Host $linha -ForegroundColor Cyan
-    Save-Progresso -Pct $pct -Passo $n -Total $tot -Nome $p.Nome -Fase $p.Fase -Decorrido $decorridoTxt -Eta $etaTxt
+    Save-Progresso -Pct $pct -Passo $n -Total $tot -Nome $p.Nome -Fase $p.Fase `
+                   -Decorrido $decorridoTxt -Falta $restanteTxt -TotalTempo $totalTxt
 }
 
 function Start-Passo {
@@ -318,7 +350,7 @@ function Start-Passo {
     # dele -- sem isto o peso dele ficaria preso e a barra nunca chegaria a 100.
     for ($k = 0; $k -lt $i; $k++) {
         if (-not $script:Plano[$k].Feito) {
-            $script:PesoFeito += $script:Plano[$k].Peso
+            $script:SegFeito += $script:Plano[$k].Seg
             $script:Plano[$k].Feito = $true
         }
     }
@@ -342,7 +374,7 @@ function Complete-Passo {
     if ($i -lt 0) { return }
     for ($k = 0; $k -le $i; $k++) {
         if (-not $script:Plano[$k].Feito) {
-            $script:PesoFeito += $script:Plano[$k].Peso
+            $script:SegFeito += $script:Plano[$k].Seg
             $script:Plano[$k].Feito = $true
         }
     }
@@ -906,23 +938,30 @@ New-Item -ItemType Directory -Force -Path $TargetDir, $script:ScriptsDir, $scrip
 # ======================================================================
 Write-Phase 'Plano / Plan'
 
-Add-Passo -Id 'req' -Nome 'requisitos: RAM, disco e virtualizacao' -Peso 1 -Fase 'Requisitos'
+# Duracao tipica de cada passo, EM SEGUNDOS. E daqui que saem tanto a barra
+# quanto a previsao de termino -- e o unico lugar a ajustar se o seu ambiente
+# for consistentemente mais rapido ou mais lento. Os dois numeros que mais
+# mexem no total sao as taxas de download e extracao logo abaixo.
+# Typical duration of each step IN SECONDS -- the single place to tune.
+$SEG_POR_GB_DOWNLOAD = 100   # ~80 Mbps de banda util
+$SEG_POR_GB_EXTRACT  = 45    # zstd -dc | tar -x, medido sobre o TAMANHO DO PACOTE
+
+Add-Passo -Id 'req' -Nome 'requisitos: RAM, disco e virtualizacao' -Seg 5 -Fase 'Requisitos'
 
 if (Should-Run 'Preflight') {
-    Add-Passo -Id 'pf' -Nome 'preflight: WSL2 e dimensionamento' -Peso 2 -Fase 'Preflight'
+    Add-Passo -Id 'pf' -Nome 'preflight: WSL2 e dimensionamento' -Seg 30 -Fase 'Preflight'
 }
 if (Should-Run 'Podman') {
-    Add-Passo -Id 'pd' -Nome 'Podman: instalar, ou usar o que ja existe' -Peso 4 -Fase 'Podman'
+    Add-Passo -Id 'pd' -Nome 'Podman: instalar, ou usar o que ja existe' -Seg 150 -Fase 'Podman'
 }
 if (Should-Run 'Machine') {
-    Add-Passo -Id 'mc:init'   -Nome 'maquina virtual: criar ou reaproveitar' -Peso 10 -Fase 'Machine'
-    Add-Passo -Id 'mc:start'  -Nome 'maquina virtual: iniciar'               -Peso 4  -Fase 'Machine'
-    Add-Passo -Id 'mc:sysctl' -Nome 'ajustes de kernel do Oracle'            -Peso 1  -Fase 'Machine'
+    Add-Passo -Id 'mc:init'   -Nome 'maquina virtual: criar ou reaproveitar' -Seg 240 -Fase 'Machine'
+    Add-Passo -Id 'mc:start'  -Nome 'maquina virtual: iniciar'               -Seg 90  -Fase 'Machine'
+    Add-Passo -Id 'mc:sysctl' -Nome 'ajustes de kernel do Oracle'            -Seg 15  -Fase 'Machine'
 }
 
-# Peso do download e da extracao em GB: sao as duas fases que dominam o
-# relogio, e faze-las pesar o tamanho real e o que impede a barra de ficar
-# parada em 20% a tarde inteira.
+# Download e extracao dominam o relogio: juntas dao quase 80% do deploy. Por
+# isso elas escalam com o tamanho real do pacote, e nao com uma constante.
 $gbPacote = 0
 if (Should-Run 'Download') {
     $script:ListaDownload = @(Resolve-Pacote)
@@ -931,37 +970,43 @@ if (Should-Run 'Download') {
         $gb = 5
         if ($it.Tamanho -gt 0) { $gb = [math]::Max(1, [math]::Round($it.Tamanho / 1GB)) }
         $gbPacote += $gb
-        Add-Passo -Id "dl:$($it.Nome)" -Nome "baixar $($it.Nome)" -Peso $gb -Fase 'Download'
+        Add-Passo -Id "dl:$($it.Nome)" -Nome "baixar $($it.Nome)" `
+                  -Seg ($gb * $SEG_POR_GB_DOWNLOAD) -Fase 'Download'
     }
 }
 if (Should-Run 'Extract') {
-    $pesoTar = 60
-    if ($gbPacote -gt 0) { $pesoTar = $gbPacote }
-    Add-Passo -Id 'ex:probe' -Nome 'extracao: conferir o filesystem da VM' -Peso 1        -Fase 'Extract'
-    Add-Passo -Id 'ex:tar'   -Nome 'extrair o /u01 (274 GB de arquivos)'   -Peso $pesoTar -Fase 'Extract'
-    Add-Passo -Id 'ex:fim'   -Nome 'extracao: permissoes e conferencia'    -Peso 2        -Fase 'Extract'
+    $gbTar = 60
+    if ($gbPacote -gt 0) { $gbTar = $gbPacote }
+    Add-Passo -Id 'ex:probe' -Nome 'extracao: conferir o filesystem da VM' -Seg 15 -Fase 'Extract'
+    Add-Passo -Id 'ex:tar'   -Nome 'extrair o /u01 (274 GB de arquivos)' `
+              -Seg ($gbTar * $SEG_POR_GB_EXTRACT) -Fase 'Extract'
+    Add-Passo -Id 'ex:fim'   -Nome 'extracao: permissoes e conferencia'   -Seg 120 -Fase 'Extract'
 }
 if (Should-Run 'Container') {
-    Add-Passo -Id 'ct'       -Nome 'carregar a imagem e criar o container' -Peso 10 -Fase 'Container'
-    Add-Passo -Id 'ct:hosts' -Nome "hosts do Windows: $AppsHost"           -Peso 1  -Fase 'Container'
+    Add-Passo -Id 'ct'       -Nome 'carregar a imagem e criar o container' -Seg 420 -Fase 'Container'
+    Add-Passo -Id 'ct:hosts' -Nome "hosts do Windows: $AppsHost"           -Seg 5   -Fase 'Container'
 }
 if (Should-Run 'Services') {
     if ($SgaGb -gt 0) {
-        Add-Passo -Id 'sv:sga' -Nome "reduzir a SGA para ${SgaGb}G" -Peso 3 -Fase 'Services'
+        Add-Passo -Id 'sv:sga' -Nome "reduzir a SGA para ${SgaGb}G" -Seg 120 -Fase 'Services'
     }
-    Add-Passo -Id 'sv:hosts' -Nome 'container: nome canonico no /etc/hosts' -Peso 1  -Fase 'Services'
-    Add-Passo -Id 'sv:db'    -Nome 'subir o banco e o listener'             -Peso 6  -Fase 'Services'
-    Add-Passo -Id 'sv:apps'  -Nome 'subir a pilha WebLogic (adstrtal)'      -Peso 10 -Fase 'Services'
-    Add-Passo -Id 'sv:cm'    -Nome 'subir o concurrent manager'             -Peso 4  -Fase 'Services'
+    Add-Passo -Id 'sv:hosts' -Nome 'container: nome canonico no /etc/hosts' -Seg 10  -Fase 'Services'
+    Add-Passo -Id 'sv:db'    -Nome 'subir o banco e o listener'             -Seg 420 -Fase 'Services'
+    Add-Passo -Id 'sv:apps'  -Nome 'subir a pilha WebLogic (adstrtal)'      -Seg 900 -Fase 'Services'
+    Add-Passo -Id 'sv:cm'    -Nome 'subir o concurrent manager'             -Seg 240 -Fase 'Services'
 }
 if (Should-Run 'Verify') {
-    Add-Passo -Id 'vf:vm'     -Nome 'conferir servicos e banco'   -Peso 2 -Fase 'Verify'
-    Add-Passo -Id 'vf:http'   -Nome 'conferir HTTP pelo Windows'  -Peso 1 -Fase 'Verify'
-    Add-Passo -Id 'vf:painel' -Nome 'gerar o painel local'        -Peso 1 -Fase 'Verify'
+    Add-Passo -Id 'vf:vm'     -Nome 'conferir servicos e banco'   -Seg 60 -Fase 'Verify'
+    Add-Passo -Id 'vf:http'   -Nome 'conferir HTTP pelo Windows'  -Seg 30 -Fase 'Verify'
+    Add-Passo -Id 'vf:painel' -Nome 'gerar o painel local'        -Seg 10 -Fase 'Verify'
 }
 
 $totalPassos = $script:PassosAntes + $script:Plano.Count
 Write-Info "$totalPassos passos no total (fases: $(($script:Plano | Select-Object -ExpandProperty Fase -Unique) -join ', '))"
+# A previsao inteira sai daqui. Mostra-la ANTES de comecar e a checagem mais
+# barata que existe: um total absurdo denuncia o plano na hora, e nao tres
+# horas depois. / Showing the forecast up front is the cheapest sanity check.
+Write-Info "tempo estimado: $(Format-Duracao ([timespan]::FromSeconds((Get-SegTotal))))"
 Write-Info 'a porcentagem pesa cada passo pelo tempo que ele costuma levar,'
 Write-Info 'entao ela NAO anda igual para todo passo -- download e extracao valem mais'
 
