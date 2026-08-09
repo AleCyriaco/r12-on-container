@@ -214,17 +214,24 @@ What each resume preserves:
   re-checked by size and SHA-256 against the manifest. An intact part is skipped
   in seconds; only the missing or corrupted one is fetched again. That is what
   splitting the package into 5 GB parts buys you.
-- **Extract.** Extraction **refuses** to run over a complete instance — a
-  deliberate interlock, and it exists because a deploy launched with the default
-  `-MachineName` once started extracting over a `/u01` whose database was
-  **open**. Leftovers from an interrupted extraction, on the other hand, are
-  cleaned up automatically before restarting.
+- **Extract.** Extraction is **skipped** when a complete instance is already in
+  place — never overwritten. The interlock exists because a deploy launched with
+  the default `-MachineName` once started extracting over a `/u01` whose database
+  was **open**; skipping is both the idempotent and the safe answer, since
+  extracting was the only destructive move available. Leftovers from an
+  interrupted extraction, on the other hand, are cleaned up automatically before
+  restarting.
+- **Target directory.** With no `-TargetDir`, an existing instance is adopted
+  (found by its `vm\ext4.vhdx`) instead of re-picking "the emptiest drive" —
+  which on a resume is no longer the instance's drive, precisely because the
+  instance fills it. The free-space requirement does not apply to a disk that
+  already holds the instance.
 - **Services.** Depends on nothing downloaded: it re-applies the canonical name
   in the container's `/etc/hosts`, starts the database, waits for the service to
   actually accept connections, and only then calls `adstrtal.sh`.
 
-If extraction stops because a complete instance already exists, you have three
-ways out — all spelled out in the error message itself: a different
+To **replace** an existing complete instance rather than keep it, you have three
+ways out — all spelled out in the skip message itself: a different
 `-MachineName` and `-TargetDir` for a parallel instance; deleting only `/u01`
 with `Remove-Instancia.ps1 -SomenteInstancia` and resuming with `-From Extract`,
 reusing the 59 GB already downloaded; or [removing everything](#removing).

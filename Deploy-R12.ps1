@@ -116,7 +116,12 @@ param(
     [int]$PassosAntes    = 0,
     [int]$PctAntes       = 0,
     [ValidateSet('All','Preflight','Podman','Machine','Download','Extract','Container','Services','Verify')]
-    [string]$From        = 'All'
+    [string]$From        = 'All',
+    # So roda o portao de requisitos e sai. Nao cria diretorio, nao baixa, nao
+    # instala nada. E como o bootstrap confere a maquina ANTES de instalar o Git.
+    # Runs the requirements gate and exits, touching nothing. Used by bootstrap
+    # to qualify the machine BEFORE installing Git.
+    [switch]$SomenteRequisitos
 )
 
 $ErrorActionPreference = 'Stop'
@@ -222,6 +227,7 @@ $script:SubPct      = 0       # 0-100 DENTRO do passo atual
 $script:UltimaLinha = ''
 $script:PassosAntes = $PassosAntes
 $script:PctAntes    = $PctAntes
+$script:Inicio      = Get-Date   # base do "decorrido"; ETA usa o ritmo DESTE run, nao desde 0%
 
 function Add-Passo {
     param([string]$Id, [string]$Nome, [double]$Peso = 1, [string]$Fase = '')
@@ -254,34 +260,53 @@ function Get-Pct {
 # Deixa o progresso legivel por fora do console (o painel, um segundo terminal,
 # ou simplesmente quem voltou depois de horas e quer saber onde parou).
 function Save-Progresso {
-    param([int]$Pct, [int]$Passo, [int]$Total, [string]$Nome, [string]$Fase)
+    param([int]$Pct, [int]$Passo, [int]$Total, [string]$Nome, [string]$Fase, [string]$Decorrido, [string]$Eta)
     if (-not $script:LogsDir -or -not (Test-Path $script:LogsDir)) { return }
     try {
         $json = [pscustomobject]@{
             pct = $Pct; passo = $Passo; total = $Total
             nome = $Nome; fase = $Fase
+            decorrido = $Decorrido; eta = $Eta
             quando = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         } | ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $script:LogsDir 'progresso.json'), $json)
     } catch { }   # status e conveniencia: nunca derrubar o deploy por causa dele
 }
 
+# mm:ss vem de baixo (0-59) direto do TimeSpan; so as horas totais precisam de calculo (podem passar de 24h)
+function Format-Duracao {
+    param([timespan]$Ts)
+    '{0}:{1:mm\:ss}' -f [int][math]::Floor($Ts.TotalHours), $Ts
+}
+
 function Write-Status {
     if ($script:Idx -lt 0) { return }
-    $p     = $script:Plano[$script:Idx]
-    $pct   = Get-Pct
-    $n     = $script:PassosAntes + $script:Idx + 1
-    $tot   = $script:PassosAntes + $script:Plano.Count
-    $cheio = [int][math]::Round($pct / 4.0)          # barra de 25 blocos
+    $p         = $script:Plano[$script:Idx]
+    $pct       = Get-Pct
+    $n         = $script:PassosAntes + $script:Idx + 1
+    $tot       = $script:PassosAntes + $script:Plano.Count
+    $cheio     = [int][math]::Round($pct / 4.0)          # barra de 25 blocos
     if ($cheio -gt 25) { $cheio = 25 }
-    $barra = ('#' * $cheio) + ('.' * (25 - $cheio))
-    $linha = '  [ passo {0}/{1} ]  [{2,3}% ] [{3}]  {4}' -f $n, $tot, $pct, $barra, $p.Nome
+    $barra     = ('#' * $cheio) + ('.' * (25 - $cheio))
+    $decorrido = (Get-Date) - $script:Inicio
+    # Ritmo DESTE run, nao desde 0%: numa retomada o -PctAntes ja vem alto e
+    # dividir pelo pct cheio faria o deploy parecer muito mais rapido do que e.
+    $feitoAgora = $pct - $script:PctAntes
+    $etaTxt = '?'
+    if ($pct -ge 100) {
+        $etaTxt = '0:00:00'
+    } elseif ($feitoAgora -gt 0) {
+        $faltaTicks = [long]($decorrido.Ticks / $feitoAgora * (100 - $pct))
+        $etaTxt = Format-Duracao ([timespan]::FromTicks($faltaTicks))
+    }
+    $decorridoTxt = Format-Duracao $decorrido
+    $linha = '  [ passo {0}/{1} ]  [{2,3}% ] [{3}]  {4}  (decorrido {5} | previsto {6})' -f $n, $tot, $pct, $barra, $p.Nome, $decorridoTxt, $etaTxt
     # So imprime quando a linha MUDA. O watcher chama isto a cada 15 s durante
     # horas; repetir a mesma linha afogaria o log sem informar nada.
     if ($linha -eq $script:UltimaLinha) { return }
     $script:UltimaLinha = $linha
     Write-Host $linha -ForegroundColor Cyan
-    Save-Progresso -Pct $pct -Passo $n -Total $tot -Nome $p.Nome -Fase $p.Fase
+    Save-Progresso -Pct $pct -Passo $n -Total $tot -Nome $p.Nome -Fase $p.Fase -Decorrido $decorridoTxt -Eta $etaTxt
 }
 
 function Start-Passo {
@@ -777,7 +802,27 @@ foreach ($d in $discos) {
         -ForegroundColor $(if ($bom) { 'Green' } else { 'DarkGray' })
 }
 
-if ($servem.Count -eq 0) {
+# RETOMADA. Uma instancia ja implantada mora em <drive>\<PastaInstancia>\vm\ext4.vhdx.
+# Sem procurar por ela, reexecutar o MESMO comando escolheria de novo "o drive com
+# mais espaco livre" -- que numa retomada ja nao e o drive da instancia, justamente
+# porque ela ocupa ~274 GB la dentro. O deploy recomecaria do zero em outro disco.
+# On resume, re-picking "the emptiest drive" would land on a different disk than the
+# one holding the instance, precisely because the instance fills it. Adopt it instead.
+if (-not $TargetDir) {
+    foreach ($d in $discos) {
+        $cand = $d.DeviceID + '\' + $PastaInstancia
+        if (Test-Path -LiteralPath (Join-Path $cand 'vm\ext4.vhdx')) { $TargetDir = $cand; break }
+    }
+}
+# O requisito de espaco LIVRE nao se aplica a uma instancia ja em disco: o espaco
+# que ele cobra e exatamente o que ela ja ocupa.
+$script:Retomando = [bool]($TargetDir -and (Test-Path -LiteralPath (Join-Path $TargetDir 'vm\ext4.vhdx')))
+
+if ($script:Retomando) {
+    Write-Host ("    {0,-18} {1,-22} {2}" -f 'Instancia achada', $TargetDir,
+        'retomando -- espaco livre nao se aplica') -ForegroundColor Cyan
+}
+elseif ($servem.Count -eq 0) {
     $maior = if ($discos) { "$($discos[0].DeviceID) com $($discos[0].LivreGB) GB livres" } else { 'nenhum disco fixo encontrado' }
     $falhas.Add("Disco: nenhum drive tem os $REQ_DISK_GB GB necessarios (o maior e $maior)")
 }
@@ -831,6 +876,15 @@ if ($falhas.Count -gt 0) {
 }
 
 Write-Ok 'todos os requisitos atendidos'
+
+# Saida do modo checagem: daqui para baixo tudo altera a maquina (cria
+# diretorio, instala WSL/Podman, baixa 59 GB). Quem so queria saber se a
+# maquina serve ja soube.
+if ($SomenteRequisitos) {
+    Write-Host '   Modo checagem: nada foi alterado nesta maquina.' -ForegroundColor Green
+    Write-Host '   Check-only mode: nothing was changed on this machine.' -ForegroundColor Green
+    return
+}
 
 # Os caminhos derivam do TargetDir, que pode ter sido ajustado acima.
 $script:ScriptsDir = Join-Path $TargetDir 'scripts'
@@ -1597,26 +1651,32 @@ mkdir -p "$MNT"
 # that would force manual cleanup to resume.
 COMPLETA="$MNT/.deploy-complete"
 if [ -d "$MNT/install/APPS" ] && [ -f "$COMPLETA" ]; then
+  # A instancia ja esta extraida: esta fase esta FEITA. Pular e a resposta
+  # idempotente -- e continua sendo a resposta SEGURA, porque a unica acao
+  # destrutiva possivel aqui era justamente extrair por cima. Antes isto
+  # abortava o deploy (exit 1) e obrigava a repetir o comando com -From
+  # Container; agora reexecutar o mesmo comando simplesmente segue adiante.
+  # The instance is already extracted: this phase is DONE. Skipping is both the
+  # idempotent and the SAFE answer -- extracting was the only destructive move
+  # available here. This used to abort (exit 1), forcing a different command.
   echo ""
-  echo "ERRO: ja existe uma instancia EBS COMPLETA em $MNT/install/APPS"
-  echo "      (implantada em $(cat "$COMPLETA" 2>/dev/null))"
+  echo "[=] instancia EBS COMPLETA ja existe em $MNT/install/APPS"
+  echo "    (implantada em $(cat "$COMPLETA" 2>/dev/null))"
+  echo "    extracao PULADA -- nada foi sobrescrito."
   echo ""
-  echo "  Extrair por cima destroi a instancia existente -- e se o banco"
-  echo "  estiver no ar, corrompe os datafiles em uso."
-  echo ""
-  echo "  Se voce QUER outra instancia nesta maquina, use nomes distintos:"
-  echo "      -MachineName <outro>  -TargetDir <outro caminho>"
-  echo ""
-  echo "  Se voce QUER MESMO substituir esta, pare tudo e limpe antes:"
+  echo "  Para SUBSTITUIR esta instancia, pare tudo e limpe antes:"
   echo "      podman stop <container>"
   echo "      rm -rf $MNT/install $COMPLETA"
+  echo "  Para uma instancia NOVA em paralelo, use nomes distintos:"
+  echo "      -MachineName <outro>  -TargetDir <outro caminho>"
   echo ""
-  echo "ERROR: a COMPLETE EBS instance already exists at $MNT/install/APPS."
-  echo "  Extracting over it destroys that instance and, if the database is"
-  echo "  running, corrupts datafiles in use. Use a different -MachineName and"
-  echo "  -TargetDir, or stop everything and remove $MNT/install first."
+  echo "[=] a COMPLETE EBS instance already exists -- extraction SKIPPED,"
+  echo "    nothing overwritten. To replace it, stop everything and remove"
+  echo "    $MNT/install first; for a parallel one use a different"
+  echo "    -MachineName and -TargetDir."
   echo ""
-  exit 1
+  echo "extracao OK (pulada -- instancia ja existente)"
+  exit 0
 fi
 
 # As ferramentas AD (adop, adadmin, frmcmp_batch, sqlplus do home 10.1.2) sao

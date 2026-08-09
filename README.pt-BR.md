@@ -218,16 +218,23 @@ O que cada retomada preserva:
   por tamanho e SHA-256 contra o manifesto. Parte já íntegra é pulada em
   segundos; só a que faltou ou veio corrompida é baixada de novo. Foi para isso
   que o pacote é dividido em pedaços de 5 GB.
-- **Extract.** A extração **recusa** passar por cima de uma instância completa —
-  é uma trava proposital, e ela existe porque um deploy com o `-MachineName`
-  no padrão já começou a extrair sobre um `/u01` com o banco **aberto**. Sobra
-  de uma extração interrompida, essa sim, é limpa sozinha antes de recomeçar.
+- **Extract.** A extração é **pulada** quando já existe uma instância completa —
+  nunca sobrescrita. A trava existe porque um deploy com o `-MachineName` no
+  padrão já começou a extrair sobre um `/u01` com o banco **aberto**; pular é ao
+  mesmo tempo a resposta idempotente e a segura, já que extrair era a única ação
+  destrutiva possível ali. Sobra de uma extração interrompida, essa sim, é limpa
+  sozinha antes de recomeçar.
+- **Diretório de destino.** Sem `-TargetDir`, uma instância existente é adotada
+  (achada pelo `vm\ext4.vhdx`) em vez de reescolher "o drive com mais espaço
+  livre" — que numa retomada já não é o drive da instância, justamente porque
+  ela o ocupa. O requisito de espaço livre não se aplica a um disco que já
+  contém a instância.
 - **Services.** Não depende de nada baixado: reaplica o nome canônico no
   `/etc/hosts` do container, sobe o banco, espera o serviço realmente aceitar
   conexão e só então chama o `adstrtal.sh`.
 
-Se a extração parar porque já existe uma instância completa, você tem três
-saídas — todas explicadas na própria mensagem de erro: usar `-MachineName` e
+Para **substituir** uma instância completa existente, em vez de mantê-la, você
+tem três saídas — todas explicadas na própria mensagem: usar `-MachineName` e
 `-TargetDir` diferentes para uma instância paralela; apagar só o `/u01` com
 `Remove-Instancia.ps1 -SomenteInstancia` e retomar com `-From Extract`,
 aproveitando os 59 GB já baixados; ou [remover tudo](#removendo).

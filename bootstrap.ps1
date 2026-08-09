@@ -121,6 +121,26 @@ Write-Host @'
 
 '@ -ForegroundColor White
 
+# ----------------------------------------------------------------- requisitos
+# Confere a maquina ANTES de instalar coisa alguma. O portao completo (RAM,
+# virtualizacao, disco) ja existe no Deploy-R12.ps1 e e read-only -- entao
+# carregamos SO ele, direto da web (nao precisa de Git nem de clone), em modo
+# checagem. Sem isto o bootstrap instalava o Git e clonava o repositorio numa
+# maquina que o deploy ia recusar tres segundos depois.
+# Qualify the machine BEFORE touching it. Deploy-R12.ps1 already owns the full
+# read-only gate, so fetch just that file (no Git, no clone needed) and run it
+# in check-only mode. Otherwise we would install Git onto a machine that the
+# deploy is about to reject anyway.
+Write-Step 'Requisitos / Requirements'
+$rawRepo  = $RepoUrl -replace '^https://github\.com/', 'https://raw.githubusercontent.com/'
+$rawBase  = ($rawRepo -replace '\.git$', '') + "/$Ref"
+$checagem = @{ SomenteRequisitos = $true }
+if ($TargetDir) { $checagem.TargetDir = $TargetDir }
+if ($KeepFs2)   { $checagem.KeepFs2   = $true }
+# Se a maquina nao atende, isto lanca e o bootstrap para AQUI -- sem Git,
+# sem clone, sem Podman, sem uma linha alterada nesta maquina.
+& ([scriptblock]::Create((Invoke-RestMethod "$rawBase/Deploy-R12.ps1"))) @checagem
+
 # ------------------------------------------------------------------------ git
 Write-Step 'Git'
 Write-Preparo 1 'Git: instalar, ou usar o que ja existe'
