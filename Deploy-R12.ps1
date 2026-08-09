@@ -227,7 +227,8 @@ $script:SubPct      = 0       # 0-100 DENTRO do passo atual
 $script:UltimaLinha = ''
 $script:PassosAntes = $PassosAntes
 $script:PctAntes    = $PctAntes
-$script:Inicio      = Get-Date   # base do "decorrido"; ETA usa o ritmo DESTE run, nao desde 0%
+$script:Inicio      = Get-Date   # base do "decorrido"
+$script:FaseIni     = @{}        # fase -> quando comecou, para medir o ritmo dela
 
 # O peso de cada passo E o tempo que ele costuma levar, em segundos. Ja foi
 # "esforco" (GB, unidades arbitrarias) e isso quebrava a previsao: os 21 pontos
@@ -275,19 +276,53 @@ function Get-Pct {
     return [int][math]::Floor($script:PctAntes + (100 - $script:PctAntes) * $frac)
 }
 
-# Quanto falta ate o FIM DE TUDO, em segundos de relogio.
+# Ritmo REAL da fase em andamento, contra o nominal dela: 1.0 = no esperado,
+# 3.0 = tres vezes mais lenta que o previsto.
 #
-# cyrix: soma nominal pura, sem corrigir pelo ritmo observado. Corrigir parece
-# obvio e e uma armadilha: o ritmo das fases iniciais nao prediz o do download.
-# Numa maquina que reaproveita a VM, os primeiros passos passam em segundos, o
-# fator despenca e a estimativa do deploy inteiro cai junto -- que e exatamente
-# o bug de "faltam 5 minutos" que esta conta veio consertar. O nominal ja escala
-# com o tamanho do pacote, que e a variavel que mais pesa.
-# Teto conhecido: banda muito fora dos 80 Mbps assumidos erra o total (para mais
-# ou para menos) enquanto o download nao termina. Se isso incomodar, o upgrade e
-# medir bytes/s durante a fase Download e reescalar SO os passos dl: restantes.
+# O fator e por FASE, e nunca sai dela. Um fator global -- medir o ritmo geral e
+# aplicar no deploy todo -- parece obvio e e uma armadilha: as fases iniciais
+# passam em segundos numa maquina que reaproveita a VM, o fator despenca e a
+# previsao do deploy inteiro despenca junto. Foi exatamente esse o bug do
+# "faltam 5 minutos". A velocidade do preflight nao diz nada sobre a sua banda;
+# a das primeiras partes do download diz tudo sobre as proximas.
+# The factor is PER PHASE and never leaves it: preflight speed says nothing
+# about your bandwidth, while the first parts of the download say everything
+# about the remaining ones.
+function Get-FatorFase {
+    param([string]$Fase)
+    if (-not $Fase -or -not $script:FaseIni.ContainsKey($Fase)) { return 1.0 }
+    $nominal = 0.0
+    for ($k = 0; $k -lt $script:Plano.Count; $k++) {
+        $p = $script:Plano[$k]
+        if ($p.Fase -ne $Fase) { continue }
+        if ($p.Feito) { $nominal += $p.Seg }
+        elseif ($k -eq $script:Idx) { $nominal += $p.Seg * ($script:SubPct / 100.0) }
+    }
+    # menos de um minuto nominal observado e ruido, nao medida
+    if ($nominal -lt 60) { return 1.0 }
+    $fator = ((Get-Date) - $script:FaseIni[$Fase]).TotalSeconds / $nominal
+    if ($fator -lt 0.25) { $fator = 0.25 }
+    if ($fator -gt 10.0) { $fator = 10.0 }
+    return $fator
+}
+
+# Quanto falta ate o FIM DE TUDO, em segundos de relogio.
+# A fase em andamento vale pelo ritmo medido; as que ainda nao comecaram valem
+# o nominal, porque sobre elas ainda nao ha nada medido para afirmar o contrario.
 function Get-Restante {
-    $resta = (Get-SegTotal) - (Get-SegFeito)
+    $faseAtual = ''
+    if ($script:Idx -ge 0) { $faseAtual = $script:Plano[$script:Idx].Fase }
+    $fator = Get-FatorFase $faseAtual
+
+    $resta = 0.0
+    for ($k = 0; $k -lt $script:Plano.Count; $k++) {
+        $p = $script:Plano[$k]
+        if ($p.Feito) { continue }
+        $seg = $p.Seg
+        if ($k -eq $script:Idx) { $seg = $p.Seg * (1 - $script:SubPct / 100.0) }
+        if ($p.Fase -eq $faseAtual) { $seg = $seg * $fator }
+        $resta += $seg
+    }
     if ($resta -lt 0) { $resta = 0 }
     return [timespan]::FromSeconds([math]::Round($resta))
 }
@@ -356,6 +391,10 @@ function Start-Passo {
     }
     $script:Idx    = $i
     $script:SubPct = 0
+    # marca o inicio da fase na primeira vez que um passo dela roda; e o relogio
+    # contra o qual o ritmo real dessa fase e medido
+    $f = $script:Plano[$i].Fase
+    if ($f -and -not $script:FaseIni.ContainsKey($f)) { $script:FaseIni[$f] = Get-Date }
     Write-Status
 }
 
@@ -943,8 +982,11 @@ Write-Phase 'Plano / Plan'
 # for consistentemente mais rapido ou mais lento. Os dois numeros que mais
 # mexem no total sao as taxas de download e extracao logo abaixo.
 # Typical duration of each step IN SECONDS -- the single place to tune.
-$SEG_POR_GB_DOWNLOAD = 100   # ~80 Mbps de banda util
-$SEG_POR_GB_EXTRACT  = 45    # zstd -dc | tar -x, medido sobre o TAMANHO DO PACOTE
+# Estes dois sao so o CHUTE INICIAL: assim que a fase correspondente comeca, o
+# ritmo real medido substitui o nominal (Get-FatorFase). Errar aqui atrasa a
+# convergencia, nao o resultado -- por isso sao conservadores de proposito.
+$SEG_POR_GB_DOWNLOAD = 180   # ~45 Mbps de banda util
+$SEG_POR_GB_EXTRACT  = 70    # zstd -dc | tar -x, medido sobre o TAMANHO DO PACOTE
 
 Add-Passo -Id 'req' -Nome 'requisitos: RAM, disco e virtualizacao' -Seg 5 -Fase 'Requisitos'
 
