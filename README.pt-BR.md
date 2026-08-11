@@ -30,16 +30,23 @@ prévio, num PowerShell **como Administrador**:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
 ```
 
-Os três mostram o andamento do mesmo jeito: **`passo N/X`** e uma barra de
-**0 a 100%**. O X é fixado antes de começar — as partes do pacote entram na
-conta — e a porcentagem pesa cada passo pelo tempo que ele costuma levar, então
-ela não anda igual para todo passo: download e extração valem quase dois terços
-da barra. O mesmo estado fica em `<TargetDir>\logs\progresso.json`, para
-consultar de outro terminal.
+Os três mostram o andamento do mesmo jeito: **`passo N/X`**, uma barra de
+**0 a 100%** e três relógios — quanto já correu, quanto falta e o total até o
+fim de tudo. O X é fixado antes de começar (as partes do pacote entram na
+conta) e o peso de cada passo **é** o tempo que ele costuma levar, então a
+barra anda em ritmo de relógio, não de contagem: download e extração sozinhos
+valem quase 80% dela.
 
 ```
-  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001
+  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001  (decorrido 0:42:03 | falta 2:41:18 | total 3:23:21)
 ```
+
+A previsão começa num nominal (45 Mbps de banda, extração média) e **se corrige
+sozinha**: assim que uma fase começa, o ritmo real medido nela substitui o
+nominal — se as primeiras partes vêm a um terço da velocidade esperada, as
+restantes já são contadas a um terço. Espere um salto na estimativa quando o
+download engrenar; é a medição entrando no lugar do chute. O mesmo estado fica
+em `<TargetDir>\logs\progresso.json`, para consultar de outro terminal.
 
 Detalhes de cada um: [instalar](#início-rápido) · [retomar](#retomando) ·
 [remover](#removendo).
@@ -67,6 +74,16 @@ Num host de 16 GB sobe e funciona, mas com swap — espere lentidão. Se souber
 melhor, sobrescreva com `-MemoryMB`, `-Cpus`, `-SgaGb`.
 
 A virtualização precisa estar habilitada na BIOS/UEFI.
+
+**Para conferir antes de instalar qualquer coisa**, sem tocar na máquina:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Deploy-R12.ps1))) -SomenteRequisitos
+```
+
+Ele lê RAM, virtualização e discos, diz o que falta e sai. O deploy normal roda
+esse mesmo portão antes de tudo — inclusive antes de instalar o Git — então uma
+máquina que não atende termina com **zero alteração**.
 
 ## Início rápido
 
@@ -240,8 +257,9 @@ tem três saídas — todas explicadas na própria mensagem: usar `-MachineName`
 aproveitando os 59 GB já baixados; ou [remover tudo](#removendo).
 
 Para acompanhar de fora, sem atrapalhar: `<TargetDir>\logs\progresso.json` tem
-o passo e a porcentagem atuais, e `<TargetDir>\logs\*.log` tem a saída íntegra
-de cada fase longa (`download.log`, `extract.log`, `services.log`).
+o passo, a porcentagem, a fase e os três tempos (`decorrido`, `falta`,
+`tempo_total`), e `<TargetDir>\logs\*.log` tem a saída íntegra de cada fase
+longa (`download.log`, `extract.log`, `services.log`).
 
 ## Depois de reiniciar o Windows
 

@@ -30,16 +30,22 @@ no prior clone, from a PowerShell running **as Administrator**:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Remove-Tudo.ps1)))
 ```
 
-All three report progress the same way: **`step N/X`** plus a **0-100%** bar.
-X is fixed before anything starts — the package parts are counted in — and the
-percentage weights each step by how long it usually takes, so it deliberately
-does not advance evenly: download and extraction are worth nearly two thirds of
-the bar. The same state is written to `<TargetDir>\logs\progresso.json` for
-reading from another terminal.
+All three report progress the same way: **`step N/X`**, a **0-100%** bar, and
+three clocks — elapsed, remaining, and the total to the end of everything.
+X is fixed before anything starts (the package parts are counted in) and each
+step's weight **is** its typical duration, so the bar moves on clock time
+rather than step count: download and extraction alone are worth nearly 80%.
 
 ```
-  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001
+  [ passo 12/35 ]  [ 20% ] [#####....................]  baixar u01-...part001  (decorrido 0:42:03 | falta 2:41:18 | total 3:23:21)
 ```
+
+The forecast starts from a nominal (45 Mbps link, average extraction) and
+**corrects itself**: once a phase begins, its measured pace replaces the
+nominal — if the first parts arrive at a third of the expected speed, the
+remaining ones are counted at a third. Expect the estimate to jump when the
+download gets going; that is measurement replacing the guess. The same state is
+written to `<TargetDir>\logs\progresso.json` for reading from another terminal.
 
 Details: [install](#quick-start) · [resume](#resuming) · [remove](#removing).
 
@@ -66,6 +72,16 @@ On a 16 GB host it boots and works, but swaps — expect it to be slow. Override
 with `-MemoryMB`, `-Cpus`, `-SgaGb` if you know better.
 
 Virtualisation must be enabled in BIOS/UEFI.
+
+**To check before installing anything**, without touching the machine:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/Deploy-R12.ps1))) -SomenteRequisitos
+```
+
+It reads RAM, virtualisation and disks, reports what is missing, and exits. The
+normal deploy runs that same gate before anything else — including before
+installing Git — so a machine that does not qualify ends with **zero changes**.
 
 ## Quick start
 
@@ -237,8 +253,9 @@ with `Remove-Instancia.ps1 -SomenteInstancia` and resuming with `-From Extract`,
 reusing the 59 GB already downloaded; or [removing everything](#removing).
 
 To follow along from outside without interfering: `<TargetDir>\logs\progresso.json`
-holds the current step and percentage, and `<TargetDir>\logs\*.log` holds the
-full output of each long phase (`download.log`, `extract.log`, `services.log`).
+holds the current step, percentage, phase and the three timings (`decorrido`,
+`falta`, `tempo_total`), and `<TargetDir>\logs\*.log` holds the full output of
+each long phase (`download.log`, `extract.log`, `services.log`).
 
 ## After a Windows reboot
 
