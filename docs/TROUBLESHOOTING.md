@@ -43,6 +43,51 @@ a cold-start race and resolves itself; the password is the real problem.
 
 ---
 
+## The same cascade, but the WebLogic password is wrong
+
+Identical to the previous entry in `adstrtal.sh` output, and a completely
+different fix. What separates the two lives in the control-script logs under
+`$INST_TOP/logs/appl/admin/log/`:
+
+```
+Connecting to Node Manager ...
+ERROR: Invalid credentials passed.
+ERROR: Unable to connect to the Node Manager. The Admin Server cannot be started up.
+```
+
+**Cause.** `Invalid credentials passed` comes from `nmConnect`: the NodeManager
+rejected the password. The NodeManager itself **is up** — its log shows `Plain
+socket listener started on port 5556` and the port answers — which is exactly
+what sends you hunting the NodeManager for hours. With no AdminServer, every
+managed server is skipped and the cascade blames the wrong component again.
+
+`-WlsPassword` must be the password that **already exists** in the image's
+domain: the deployment authenticates with it, it does not set it. The reference
+package ships with `welcome1`.
+
+**Ten-second confirmation.** If `AdminServer.out` still carries the image
+capture date, it never even tried to start — the startup died earlier, at the
+NodeManager:
+
+```bash
+podman exec ebs ls -la \
+  /u01/install/APPS/fs1/FMW_Home/user_projects/domains/EBS_domain/servers/AdminServer/logs/AdminServer.out
+```
+
+**Fix.** Re-run the bring-up with the right password:
+
+```powershell
+podman machine ssh ebs 'WLS_PASSWORD=welcome1 bash /mnt/c/R12OnContainer/scripts/bringup.sh'
+```
+
+**The trap inside the trap.** Until this version `bringup.sh` and the deployment's
+`services` step always exited 0: without `set -e`, a failing `adstrtal.sh`
+stopped nothing and the final status came from the last `echo`. The panel
+reported 100% and `services.log.rc` held 0 with WebLogic down — the bring-up
+lied. Both now exit non-zero when the application tier does not come up.
+
+---
+
 ## Listener binds to the short hostname
 
 Compare the origin and the new host in

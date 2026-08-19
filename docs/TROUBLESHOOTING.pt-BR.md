@@ -44,6 +44,52 @@ frio e se resolve sozinha; a senha é o problema real.
 
 ---
 
+## A mesma cascata, mas com a senha do WebLogic errada
+
+Idêntica à anterior na saída do `adstrtal.sh`, e com correção completamente
+diferente. O que separa as duas está nos logs dos scripts de controle, em
+`$INST_TOP/logs/appl/admin/log/`:
+
+```
+Connecting to Node Manager ...
+ERROR: Invalid credentials passed.
+ERROR: Unable to connect to the Node Manager. The Admin Server cannot be started up.
+```
+
+**Causa.** `Invalid credentials passed` vem do `nmConnect`: o NodeManager
+recusou a senha. Ele **está no ar** — o `nodemanager.log` mostra `Plain socket
+listener started on port 5556` e a porta responde — e é justamente isso que faz
+perder horas caçando o NodeManager. Sem AdminServer, todos os managed servers
+são pulados e a cascata acusa o componente errado mais uma vez.
+
+O `-WlsPassword` precisa ser a senha que **já existe** no domínio da imagem: o
+deploy autentica com ela, não a define. O pacote de referência sai de fábrica
+com `welcome1`.
+
+**Como confirmar em dez segundos.** Se o `AdminServer.out` ainda estiver com a
+data da captura da imagem, ele nunca chegou a tentar subir — o start morreu
+antes, no NodeManager:
+
+```bash
+podman exec ebs ls -la \
+  /u01/install/APPS/fs1/FMW_Home/user_projects/domains/EBS_domain/servers/AdminServer/logs/AdminServer.out
+```
+
+**Correção.** Refazer o bring-up com a senha certa:
+
+```powershell
+podman machine ssh ebs 'WLS_PASSWORD=welcome1 bash /mnt/c/R12OnContainer/scripts/bringup.sh'
+```
+
+**A armadilha dentro da armadilha.** Até esta versão o `bringup.sh` e o passo
+`services` do deploy terminavam sempre em 0: sem `set -e`, o `adstrtal.sh`
+saindo 1 não interrompia nada e o status final era o do último `echo`. O painel
+marcava 100% e o `services.log.rc` ficava 0 com o WebLogic fora do ar — o
+bring-up mentia. Os dois agora saem diferente de zero quando o apps tier não
+sobe.
+
+---
+
 ## O listener sobe com o hostname curto
 
 Compare a origem e a máquina nova em

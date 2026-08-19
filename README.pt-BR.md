@@ -92,9 +92,16 @@ Comando testado em campo — rode num PowerShell **como Administrador**:
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
     -BaseUrl 'https://pub-SEUHASH.r2.dev' `
-    -WlsPassword 'SUA_SENHA_DO_WEBLOGIC' `
+    -WlsPassword 'welcome1' `
     -TargetDir 'C:\R12OnContainer'
 ```
+
+> **`-WlsPassword` é a senha que a imagem já tem, não uma que você escolhe.** O
+> deploy usa essa senha para autenticar no NodeManager; ele não troca a senha do
+> WebLogic. O pacote de referência sai de fábrica com `welcome1` — só passe
+> outra coisa se a sua imagem tiver sido alterada. Uma senha inventada aqui não
+> falha na hora: o deploy roda até o fim, só o WebLogic fica fora do ar, e o
+> motivo (`Invalid credentials passed`) fica enterrado no `services.log`.
 
 Isso instala o Git se faltar, clona este repositório em `C:\r12-on-container` e
 dispara o deploy completo. Conte com algumas horas, dominadas pelo download.
@@ -204,7 +211,7 @@ dual filesystem, que aceita patches.
 | Chave | Significado |
 |---|---|
 | `FolderUrl` | pasta pública do Drive com as partes |
-| `WlsPassword` | senha do WebLogic — **obrigatória** |
+| `WlsPassword` | senha que **já existe** no domínio da imagem (fábrica: `welcome1`) |
 | `AppsPassword` | senha do schema APPS (padrão `apps`) |
 | `AppsHost` | hostname gravado no contexto do EBS |
 | `TargetDir` | onde instalar |

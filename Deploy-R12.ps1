@@ -2085,10 +2085,26 @@ echo "[*] pilha de aplicacao"
 # vazia, o AdminServer falha com status 1 e todos os managed servers sao pulados
 # com "Skipping startup ... AdminServer is down" -- mensagem que despista, porque
 # o erro real (senha) fica escondido atras da cascata sobre o AdminServer.
-printf '%s\n' '__WLSPWD__' | podman exec -i -u oracle "$CTR" bash -lc '
+APPSOUT=$(printf '%s\n' '__WLSPWD__' | podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/EBSapps.env run
-  $ADMIN_SCRIPTS_HOME/adstrtal.sh apps/__APPSPWD__' 2>&1 |
-  grep -E "exiting with status|Exiting with status|ERROR"
+  $ADMIN_SCRIPTS_HOME/adstrtal.sh apps/__APPSPWD__' 2>&1)
+echo "$APPSOUT" | grep -E "exiting with status|Exiting with status|ERROR"
+
+# Senha errada e falha generica saem as duas como "AdminServer is down", entao
+# separe as duas aqui. "Invalid credentials passed" vem do nmConnect: a senha
+# do WebLogic foi recusada. O NodeManager em si subiu -- o log dele mostra
+# "Plain socket listener started on port 5556" -- e e justamente isso que faz
+# perder tempo cacando o NodeManager. -WlsPassword precisa ser a senha que JA
+# existe no dominio da imagem: o deploy usa essa senha, nao a define.
+APPSFAIL=0
+if echo "$APPSOUT" | grep -q "Invalid credentials passed"; then
+  APPSFAIL=1
+  echo "ERRO: o NodeManager recusou a senha do WebLogic (-WlsPassword)."
+  echo "      A senha de fabrica do pacote de referencia e 'welcome1'."
+elif echo "$APPSOUT" | grep -qE "ServiceControl is exiting with status [1-9]"; then
+  APPSFAIL=1
+  echo "ERRO: a pilha de aplicacao nao subiu por completo."
+fi
 
 # O ICM as vezes perde a corrida com o lock da sessao anterior e morre com
 # "FND_DCP.Request_Session_Lock ... result code of 1 / establish_icm failed".
@@ -2108,6 +2124,14 @@ if ! echo "$CM" | grep -qi "is Active"; then
     source /u01/install/APPS/EBSapps.env run >/dev/null 2>&1
     $ADMIN_SCRIPTS_HOME/adcmctl.sh start apps/apps' 2>&1 | grep -iE "starting|exiting with status"
   sleep 60
+fi
+
+# Este passo terminava SEMPRE em 0: o ultimo comando era um echo, entao o
+# Wait-VmStep recebia rc=0 e o deploy declarava sucesso com o WebLogic fora do
+# ar -- painel em 100%, services.log.rc em 0 e nenhum AdminServer no ar.
+if [ "$APPSFAIL" = "1" ]; then
+  echo "ERRO: bring-up incompleto -- o apps tier nao subiu."
+  exit 1
 fi
 
 echo "[*] services OK"

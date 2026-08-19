@@ -90,9 +90,17 @@ Field-tested one-liner — run from an **elevated** PowerShell:
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/AleCyriaco/r12-on-container/main/bootstrap.ps1))) `
     -BaseUrl 'https://pub-YOURHASH.r2.dev' `
-    -WlsPassword 'YOUR_WEBLOGIC_PASSWORD' `
+    -WlsPassword 'welcome1' `
     -TargetDir 'C:\R12OnContainer'
 ```
+
+> **`-WlsPassword` is the password the image already has, not one you pick.**
+> The deployment authenticates to the NodeManager with it; it does not set or
+> change the WebLogic password. The reference package ships with `welcome1` —
+> only pass something else if your image was changed. A made-up password here
+> does not fail fast: the deployment runs to completion, only WebLogic stays
+> down, and the reason (`Invalid credentials passed`) is buried in
+> `services.log`.
 
 That installs Git if needed, clones this repo to `C:\r12-on-container`, and runs
 the full deployment. Expect several hours, dominated by the download.
@@ -199,7 +207,7 @@ install.
 | Key | Meaning |
 |---|---|
 | `FolderUrl` | public Drive folder with the parts |
-| `WlsPassword` | WebLogic password — **required** |
+| `WlsPassword` | the password that **already exists** in the image domain (factory: `welcome1`) |
 | `AppsPassword` | APPS schema password (defaults to `apps`) |
 | `AppsHost` | hostname baked into the EBS context |
 | `TargetDir` | where to install |
