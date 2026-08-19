@@ -1925,7 +1925,17 @@ podman exec "$CTR" bash -lc 'getent hosts __APPSHOST__'
         $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
         $entry     = "127.0.0.1    $AppsHost"
         $atual     = Get-Content $hostsFile -ErrorAction SilentlyContinue
-        if ($atual -match [regex]::Escape($AppsHost)) {
+        # Conferir o IP, nao so o nome. Uma entrada antiga apontando para o IP
+        # de LAN da maquina deixa de valer quando o DHCP troca o endereco, e o
+        # sintoma e o AppsLogin dando timeout com o EBS perfeitamente no ar. O
+        # container publica a 8000 no proprio host, entao o alvo e 127.0.0.1.
+        $padrao = '(^|\s)' + [regex]::Escape($AppsHost) + '(\s|$)'
+        $linha  = $atual | Where-Object { $_ -notmatch '^\s*#' -and $_ -match $padrao } | Select-Object -First 1
+        if ($linha -and $linha -notmatch '^\s*127\.0\.0\.1\s') {
+            Write-Warn2 "$AppsHost esta no hosts do Windows apontando para outro IP:"
+            Write-Host "      $($linha.Trim())" -ForegroundColor Yellow
+            Write-Host "      Troque essa linha por: $entry" -ForegroundColor Yellow
+        } elseif ($linha) {
             Write-Ok "$AppsHost ja resolve no hosts do Windows"
         } elseif (Test-Admin) {
             Add-Content -Path $hostsFile -Value "`n$entry"
