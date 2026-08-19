@@ -1,0 +1,16 @@
+[package]
+name = "painel-ebs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tao = "0.36.0"
+wry = "0.56.1"
+
+# Binario unico para distribuir: sem runtime, sem DLL ao lado. O ganho de
+# tamanho vem quase todo do LTO com uma unidade de codegen.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

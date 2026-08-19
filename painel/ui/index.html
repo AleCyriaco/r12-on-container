@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>EBS R12.2.12 — Painel local</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#262b36; --tx:#e6e9ef; --dim:#8b94a7;
+    --ok:#3fb950; --warn:#d29922; --err:#f85149; --acc:#4493f8;
+    --mono:ui-monospace,"Cascadia Code",Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --tx:#1c2028; --dim:#5c6470; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px;background:var(--bg);color:var(--tx);
+       font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:20px}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);
+           margin:0 0 14px;font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td{padding:7px 0;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--dim);width:42%}
+  code{font-family:var(--mono);font-size:13px}
+  .cp{cursor:pointer;background:none;border:1px solid var(--line);color:var(--tx);
+      border-radius:6px;padding:3px 9px;font-family:var(--mono);font-size:13px;
+      transition:.15s;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cp:hover{border-color:var(--acc);color:var(--acc)}
+  .cp.done{border-color:var(--ok);color:var(--ok)}
+  .btn{display:block;width:100%;text-align:left;padding:11px 14px;margin-bottom:8px;
+       background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--tx);
+       text-decoration:none;font-size:14px;cursor:pointer;transition:.15s}
+  .btn:hover:not(:disabled){border-color:var(--acc)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn b{display:block;font-size:14px}
+  .btn span{color:var(--dim);font-size:12px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;
+       background:var(--dim);vertical-align:middle}
+  .dot.up{background:var(--warn)} .dot.on{background:var(--ok)} .dot.off{background:var(--err)}
+  .alert{background:rgba(210,153,34,.1);border:1px solid var(--warn);border-radius:8px;
+         padding:13px 15px;font-size:13px;margin-bottom:16px}
+  .alert b{color:var(--warn)}
+  .alert.bad{background:rgba(248,81,73,.1);border-color:var(--err)}
+  .alert.bad b{color:var(--err)}
+  .foot{color:var(--dim);font-size:12px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}
+  .pre{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);
+       border-radius:6px;padding:9px 11px;margin-top:8px;overflow-x:auto;white-space:pre-wrap}
+  .runcard{grid-column:1/-1}
+  .runhead{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .runhead h2{margin:0;flex:1}
+  .pill{font-size:11px;padding:2px 9px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
+  .pill.run{border-color:var(--warn);color:var(--warn)}
+  .pill.ok{border-color:var(--ok);color:var(--ok)}
+  .pill.err{border-color:var(--err);color:var(--err)}
+  #saida{font-family:var(--mono);font-size:12px;line-height:1.5;background:var(--bg);
+         border:1px solid var(--line);border-radius:6px;padding:11px 13px;height:300px;
+         overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+  #saida .l-erro{color:var(--err)}
+  #saida .l-passo{color:var(--acc)}
+  #saida .l-fim{color:var(--ok)}
+  #saida .l-meta{color:var(--dim)}
+  .vazio{color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Oracle EBS R12.2.12 + LAD Brasil</h1>
+  <div class="sub">Painel local &middot; máquina Podman <code>__MACHINE__</code> &middot; os botões executam direto no Windows</div>
+
+  <div class="alert">
+    <b>Esta janela mostra todas as senhas em texto puro.</b>
+    Ela é local, está fora do repositório e não deve ser compartilhada nem
+    copiada para nenhum lugar público.
+  </div>
+
+  <div id="avisoHosts" class="alert bad" style="display:none">
+    <b>__APPSHOST__ não aponta para 127.0.0.1.</b>
+    <span id="avisoHostsTx"></span>
+    <button class="btn" id="b-hosts" style="margin-top:10px" onclick="rodar('corrigir_hosts')">
+      <b>Corrigir agora</b><span>o Windows vai pedir confirmação de Administrador</span></button>
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <h2>Estado</h2>
+      <table>
+        <tr><td>Aplicação (porta __APPSPORT__)</td>
+            <td><span class="dot up" id="dApp"></span><span id="sApp">verificando…</span></td></tr>
+        <tr><td>Banco (porta __DBPORT__)</td>
+            <td><span class="dot up" id="dDb"></span><span id="sDb">verificando…</span></td></tr>
+        <tr><td>Máquina Podman</td>
+            <td><span class="dot up" id="dVm"></span><span id="sVm">verificando…</span></td></tr>
+        <tr><td>Verificado em</td><td id="hora">—</td></tr>
+      </table>
+      <button class="btn" style="margin-top:12px" onclick="checar()">Verificar de novo</button>
+      <div class="pre">O listener da __DBPORT__ fala TNS, não HTTP: aqui ele é testado por conexão TCP direta, que é o que um cliente Oracle faz antes de qualquer coisa. O painel antigo, em HTML puro, não tinha como fazer isso e por isso omitia o banco.</div>
+    </div>
+
+    <div class="card">
+      <h2>Atalhos</h2>
+      <a class="btn" href="http://__APPSHOST__:__APPSPORT__/OA_HTML/AppsLogin" target="_blank">
+        <b>Abrir o EBS ↗</b><span>SYSADMIN / __SYSADMIN__</span></a>
+      <button class="btn" id="b-iniciar" onclick="rodar('iniciar')">
+        <b>Iniciar EBS</b><span>banco, WebLogic e concurrent manager — 10 a 20 min</span></button>
+      <button class="btn" id="b-parar" onclick="rodar('parar')">
+        <b>Parar EBS</b><span>aplicação, banco e container, nessa ordem</span></button>
+      <button class="btn" id="b-status" onclick="rodar('status')">
+        <b>Ver status detalhado</b><span>processos, banco e códigos HTTP</span></button>
+    </div>
+
+    <div class="card">
+      <h2>Aplicação</h2>
+      <table>
+        <tr><td>SYSADMIN</td><td><button class="cp" onclick="cp(this,'__SYSADMIN__')">__SYSADMIN__</button></td></tr>
+        <tr><td>URL</td><td><button class="cp" onclick="cp(this,'http://__APPSHOST__:__APPSPORT__/OA_HTML/AppsLogin')">…/OA_HTML/AppsLogin</button></td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Banco de dados</h2>
+      <table>
+        <tr><td>APPS</td><td><button class="cp" onclick="cp(this,'__APPSPWD__')">__APPSPWD__</button></td></tr>
+        <tr><td>APPLSYS</td><td><button class="cp" onclick="cp(this,'__APPSPWD__')">__APPSPWD__</button></td></tr>
+        <tr><td>EBS_SYSTEM</td><td><button class="cp" onclick="cp(this,'__EBSSYSTEM__')">__EBSSYSTEM__</button></td></tr>
+        <tr><td>SYSTEM</td><td><button class="cp" onclick="cp(this,'__SYSTEMPWD__')">__SYSTEMPWD__</button></td></tr>
+        <tr><td>SYS</td><td><button class="cp" onclick="cp(this,'__SYSPWD__')">__SYSPWD__</button></td></tr>
+        <tr><td>CLL</td><td><button class="cp" onclick="cp(this,'__CLLPWD__')">__CLLPWD__</button></td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>WebLogic</h2>
+      <table>
+        <tr><td>weblogic</td><td><button class="cp" onclick="cp(this,'__WLSPWD__')">__WLSPWD__</button></td></tr>
+        <tr><td>Console</td><td><code>:7001/console</code></td></tr>
+      </table>
+      <div class="pre">O AdminServer sobe na 7001, mas essa porta não é publicada para o Windows — só é acessível de dentro do container.</div>
+    </div>
+
+    <div class="card">
+      <h2>Conexão ao banco</h2>
+      <table>
+        <tr><td>Host</td><td><button class="cp" onclick="cp(this,'localhost')">localhost</button></td></tr>
+        <tr><td>Porta</td><td><button class="cp" onclick="cp(this,'__DBPORT__')">__DBPORT__</button></td></tr>
+        <tr><td>Service</td><td><button class="cp" onclick="cp(this,'__SERVICE__')">__SERVICE__</button></td></tr>
+        <tr><td>CDB</td><td><code>__CDB__</code></td></tr>
+        <tr><td>JDBC</td><td><button class="cp" onclick="cp(this,'jdbc:oracle:thin:@//localhost:__DBPORT__/__SERVICE__')">jdbc:oracle:thin:@…</button></td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Comandos úteis</h2>
+      <button class="btn" id="b-shell" onclick="rodar('shell')">
+        <b>Shell como oracle</b><span>abre um terminal dentro do container</span></button>
+      <button class="btn" id="b-log" onclick="rodar('log')">
+        <b>Log do último start</b><span>adstrtal.log, últimas 80 linhas</span></button>
+    </div>
+
+    <div class="card">
+      <h2>Ambiente</h2>
+      <table>
+        <tr><td>Máquina Podman</td><td><code>__MACHINE__</code></td></tr>
+        <tr><td>Instância</td><td><code>__TARGET__</code></td></tr>
+        <tr><td>Volume /u01</td><td><code>__U01__</code> (ext4)</td></tr>
+        <tr><td>Repositório</td><td><a href="https://github.com/AleCyriaco/r12-on-container" target="_blank" style="color:var(--acc)">r12-on-container ↗</a></td></tr>
+      </table>
+    </div>
+
+    <div class="card runcard">
+      <div class="runhead">
+        <h2>Execução</h2>
+        <span class="pill" id="pill">ocioso</span>
+      </div>
+      <div id="saida"><span class="vazio">A saída dos comandos aparece aqui, ao vivo.</span></div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    Após reiniciar o Windows, o container volta sozinho mas os serviços do EBS não —
+    use <b>Iniciar EBS</b>.
+    <br><br>
+    Se <code>__APPSHOST__</code> não abrir, confira o <code>hosts</code> do Windows em
+    <code>C:\Windows\System32\drivers\etc\hosts</code>: precisa de
+    <code>127.0.0.1 __APPSHOST__</code> e de nenhuma outra linha com esse mesmo nome —
+    nome duplicado resolve para dois endereços e causa falhas intermitentes.
+  </div>
+
+</div>
+
+<script>
+function flash(el, txt){
+  const orig = el.textContent;
+  el.textContent = txt; el.classList.add('done');
+  setTimeout(function(){ el.textContent = orig; el.classList.remove('done'); }, 1100);
+}
+// navigator.clipboard exige contexto seguro e pode pedir permissao dentro do
+// WebView2. O textarea + execCommand nao depende de nenhum dos dois e serve de
+// rede de seguranca silenciosa.
+function legado(txt){
+  var ta = document.createElement('textarea');
+  ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+}
+function copiar(txt){
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(txt).catch(function(){ legado(txt); });
+  }
+  legado(txt);
+  return Promise.resolve();
+}
+function cp(el, txt){ copiar(txt).then(function(){ flash(el, 'copiado'); }); }
+
+var BOTOES = ['b-iniciar','b-parar','b-status','b-shell','b-log','b-hosts'];
+var jaPediuHosts = false;
+var saida = document.getElementById('saida');
+var pill  = document.getElementById('pill');
+var ocupado = false;
+
+function trava(v){
+  ocupado = v;
+  BOTOES.forEach(function(id){
+    var b = document.getElementById(id);
+    if (b) b.disabled = v;
+  });
+}
+function linha(txt, cls){
+  var d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = txt;
+  saida.appendChild(d);
+  saida.scrollTop = saida.scrollHeight;
+}
+function rodar(acao){
+  if (ocupado) return;
+  trava(true);
+  saida.innerHTML = '';
+  pill.textContent = 'executando'; pill.className = 'pill run';
+  window.ipc.postMessage(acao);
+}
+
+// chamado pelo lado Rust
+window.pnl = {
+  linha: function(txt, cls){ linha(txt, cls); },
+  fim: function(codigo){
+    trava(false);
+    if (codigo === 0) { pill.textContent = 'concluído'; pill.className = 'pill ok'; }
+    else { pill.textContent = 'falhou (' + codigo + ')'; pill.className = 'pill err'; }
+    checar();
+  },
+  estado: function(e){
+    marcar('App', e.app_ok, e.app_txt);
+    marcar('Db',  e.db_ok,  e.db_txt);
+    marcar('Vm',  e.vm_ok,  e.vm_txt);
+    document.getElementById('hora').textContent = new Date().toLocaleTimeString('pt-BR');
+    var av = document.getElementById('avisoHosts');
+    if (e.hosts_ok) { av.style.display = 'none'; }
+    else {
+      av.style.display = '';
+      document.getElementById('avisoHostsTx').textContent = ' ' + e.hosts_txt;
+      // Ao abrir, tenta corrigir sozinho — uma vez só. A sondagem se repete a
+      // cada 30s e insistir aqui faria o UAC reaparecer sem parar; se a
+      // elevação for recusada, o botão do aviso continua disponível.
+      if (!jaPediuHosts && !ocupado) { jaPediuHosts = true; rodar('corrigir_hosts'); }
+    }
+  }
+};
+function marcar(id, ok, txt){
+  document.getElementById('d' + id).className = 'dot ' + (ok ? 'on' : 'off');
+  document.getElementById('s' + id).textContent = txt;
+}
+function checar(){
+  ['App','Db','Vm'].forEach(function(id){
+    document.getElementById('d' + id).className = 'dot up';
+    document.getElementById('s' + id).textContent = 'verificando…';
+  });
+  window.ipc.postMessage('probe');
+}
+checar();
+setInterval(function(){ if (!ocupado) checar(); }, 30000);
+</script>
+</body>
+</html>
