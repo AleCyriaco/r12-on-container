@@ -1923,26 +1923,74 @@ podman exec "$CTR" bash -lc 'getent hosts __APPSHOST__'
     # para o hostname e o EBS o grava no contexto e nos perfis.
     if (-not $SkipHostsEntry) {
         $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-        $entry     = "127.0.0.1    $AppsHost"
-        $atual     = Get-Content $hostsFile -ErrorAction SilentlyContinue
-        # Conferir o IP, nao so o nome. Uma entrada antiga apontando para o IP
-        # de LAN da maquina deixa de valer quando o DHCP troca o endereco, e o
-        # sintoma e o AppsLogin dando timeout com o EBS perfeitamente no ar. O
-        # container publica a 8000 no proprio host, entao o alvo e 127.0.0.1.
-        $padrao = '(^|\s)' + [regex]::Escape($AppsHost) + '(\s|$)'
-        $linha  = $atual | Where-Object { $_ -notmatch '^\s*#' -and $_ -match $padrao } | Select-Object -First 1
-        if ($linha -and $linha -notmatch '^\s*127\.0\.0\.1\s') {
-            Write-Warn2 "$AppsHost esta no hosts do Windows apontando para outro IP:"
-            Write-Host "      $($linha.Trim())" -ForegroundColor Yellow
-            Write-Host "      Troque essa linha por: $entry" -ForegroundColor Yellow
-        } elseif ($linha) {
-            Write-Ok "$AppsHost ja resolve no hosts do Windows"
+        $entry     = "127.0.0.1`t$AppsHost"
+        $linhas    = @(Get-Content $hostsFile -ErrorAction SilentlyContinue)
+
+        # Conferir para onde o nome aponta, nao apenas se ele aparece. Uma
+        # entrada antiga apontando para o IP de LAN da maquina passava por
+        # "ja resolve", sobrevivia ao deploy inteiro e deixava de valer no lease
+        # seguinte do DHCP. O sintoma nao ajuda: AppsLogin em timeout com o EBS
+        # inteiro no ar e o 127.0.0.1:8000 respondendo 302. Como este passo roda
+        # elevado, a linha errada e corrigida aqui e nao deixada como recado.
+        #
+        # A linha inteira nunca e descartada: um mesmo IP costuma listar varios
+        # nomes, e jogar a linha fora levaria os outros junto. Sai so o nome em
+        # questao; a linha some apenas se ficar sem nome nenhum.
+        $novas     = New-Object System.Collections.Generic.List[string]
+        $conflitos = New-Object System.Collections.Generic.List[string]
+        $jaCorreta = $false
+
+        foreach ($l in $linhas) {
+            if ($l -match '^\s*#' -or $l -notmatch '\S') { $novas.Add($l); continue }
+
+            $corpo = $l; $comentario = ''
+            $i = $l.IndexOf('#')
+            if ($i -ge 0) { $corpo = $l.Substring(0, $i); $comentario = ' ' + $l.Substring($i) }
+
+            $campos = @($corpo.Trim() -split '\s+' | Where-Object { $_ -ne '' })
+            if ($campos.Count -lt 2) { $novas.Add($l); continue }
+
+            $ip    = $campos[0]
+            $nomes = @($campos | Select-Object -Skip 1)
+            if (-not ($nomes | Where-Object { $_ -eq $AppsHost })) { $novas.Add($l); continue }
+
+            # Ja canonica e a primeira: mantem. Qualquer outra citacao do nome e
+            # conflito, inclusive uma segunda 127.0.0.1 -- nome duplicado
+            # resolve para enderecos diferentes e falha de forma intermitente.
+            if (-not $jaCorreta -and $ip -eq '127.0.0.1' -and $nomes.Count -eq 1) {
+                $jaCorreta = $true
+                $novas.Add($l)
+                continue
+            }
+
+            $conflitos.Add($corpo.Trim())
+            $resto = @($nomes | Where-Object { $_ -ne $AppsHost })
+            if ($resto.Count -gt 0) {
+                $novas.Add(("{0}`t{1}{2}" -f $ip, ($resto -join ' '), $comentario))
+            }
+        }
+
+        if ($jaCorreta -and $conflitos.Count -eq 0) {
+            Write-Ok "$AppsHost ja resolve para 127.0.0.1 no hosts do Windows"
         } elseif (Test-Admin) {
-            Add-Content -Path $hostsFile -Value "`n$entry"
-            Write-Ok "adicionado ao hosts: $entry"
+            if (-not $jaCorreta) { $novas.Add($entry) }
+            $bak = "$hostsFile.r12-bak"
+            Copy-Item $hostsFile $bak -Force -ErrorAction SilentlyContinue
+            # Sem -Encoding: o padrao do Windows PowerShell e ANSI sem BOM, que
+            # e o que o resolvedor espera. UTF-8 com BOM quebra a primeira linha.
+            Set-Content -Path $hostsFile -Value $novas
+            if ($conflitos.Count -gt 0) {
+                Write-Ok ("hosts corrigido: {0} -> 127.0.0.1 {1}" -f ($conflitos -join ' | '), $AppsHost)
+                Write-Host "      copia do original em $bak" -ForegroundColor DarkGray
+            } else {
+                Write-Ok "adicionado ao hosts: 127.0.0.1 $AppsHost"
+            }
         } else {
-            Write-Warn2 'sem privilegio para editar o hosts do Windows. Rode como Administrador:'
-            Write-Host "      Add-Content '$hostsFile' `"`n$entry`"" -ForegroundColor Yellow
+            Write-Warn2 'sem privilegio para editar o hosts do Windows. Rode como Administrador, ou ajuste a mao:'
+            Write-Host "      $hostsFile precisa de UMA linha: 127.0.0.1    $AppsHost" -ForegroundColor Yellow
+            if ($conflitos.Count -gt 0) {
+                Write-Host "      removendo antes: $($conflitos -join ' | ')" -ForegroundColor Yellow
+            }
         }
     }
     Complete-Passo 'ct:hosts'
