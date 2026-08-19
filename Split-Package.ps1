@@ -1,6 +1,6 @@
-<#
+﻿<#
 .SYNOPSIS
-    Divide o pacote do EBS em partes menores para subir no Google Drive,
+    Divide o pacote do EBS em partes menores para subir num bucket HTTP,
     gerando um manifesto com SHA-256 de cada parte.
 
 .DESCRIPTION
@@ -146,8 +146,8 @@ Write-Host @"
 
   Proximo passo: suba TODO o conteudo de
       $OutDir
-  para uma pasta do Google Drive e compartilhe como
-      "Qualquer pessoa com o link" -> Leitor
+  para o bucket (Upload-ToR2.ps1 faz isso) e habilite leitura publica.
+  A URL publica do bucket e o que vai em -BaseUrl.
 
   O manifest.txt precisa subir junto: o Deploy-R12.ps1 confere o SHA-256
   de cada parte contra ele antes de extrair.

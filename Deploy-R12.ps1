@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Instala o Podman (se necessario) e faz o deploy do Oracle EBS R12.2.12 +
-    LAD Brasil a partir de uma pasta publica do Google Drive.
+    LAD Brasil a partir de um bucket HTTP (Cloudflare R2, S3 ou equivalente).
 
 .DESCRIPTION
     Executa em fases idempotentes. Cada fase confere se o trabalho ja foi feito
@@ -10,7 +10,7 @@
       Preflight  requisitos de hardware, WSL2, virtualizacao
       Podman     instala o Podman se nao houver
       Machine    cria a VM WSL2 dimensionada e move o disco para -TargetDir
-      Download   baixa as partes da pasta do Drive PARA DENTRO da VM
+      Download   baixa as partes do bucket PARA DENTRO da VM
       Extract    extrai o /u01 no ext4 da VM (sem o fs2, salvo -KeepFs2)
       Container  carrega a imagem, cria o container, ajusta o /etc/hosts
       Services   sobe banco, listener e a pilha WebLogic
@@ -25,24 +25,10 @@
     long each step usually takes; the same state is in logs\progresso.json.
 
 .PARAMETER BaseUrl
-    RECOMENDADO. URL base de um bucket/host HTTP com as partes e o
-    manifest.txt -- Cloudflare R2, S3, ou qualquer servidor com suporte a
-    Range. Ex: https://pub-abc123.r2.dev
-    Sem cota, sem scraping, retomada byte-exata via curl -C -.
-
-.PARAMETER FolderUrl
-    Alternativa: pasta publica do Google Drive com as partes e o manifest.txt.
-    Funciona, mas depende de scraping do HTML e a cota de download do Drive
-    interrompe transferencias grandes -- medido em campo: ~56 GB numa janela
-    curta ja basta para o Drive comecar a devolver pagina de erro.
-    Ex: https://drive.google.com/drive/folders/1AbC...
-
-.PARAMETER VolumeFileId
-    Saida de emergencia: ID do u01-*.tar.zst inteiro, se a leitura da pasta
-    falhar. Sem manifesto nao ha conferencia de SHA-256.
-
-.PARAMETER ImageFileId
-    Saida de emergencia: ID do ebs-image-*.tar.zst.
+    OBRIGATORIO. URL base de um bucket/host HTTP com as partes e o
+    manifest.txt -- Cloudflare R2, S3, ou qualquer servidor que aceite Range.
+    Ex: https://pub-abc123.r2.dev
+    A retomada e byte-exata, via curl -C -.
 
 .PARAMETER KeepFs2
     Mantem o patch filesystem (fs2). Sem esta opcao o fs2 e descartado na
@@ -53,23 +39,20 @@
     de RAM fisica. 0 (padrao) mantem os 20 GB do pacote.
 
 .EXAMPLE
-    .\Deploy-R12.ps1 -FolderUrl 'https://drive.google.com/drive/folders/1AbC...'
+    .\Deploy-R12.ps1 -BaseUrl 'https://pub-abc123.r2.dev'
 
 .EXAMPLE
     # maquina menor, mantendo o patch filesystem, retomando da extracao
-    .\Deploy-R12.ps1 -FolderUrl '...' -SgaGb 8 -KeepFs2 -From Extract
+    .\Deploy-R12.ps1 -BaseUrl 'https://pub-abc123.r2.dev' -SgaGb 8 -KeepFs2 -From Extract
 
 .NOTES
-    O download de ~58 GB de uma pasta publica do Drive e o ponto fragil deste
-    script. O Google impoe cota por arquivo publico e responde com uma pagina
-    HTML de erro em vez do arquivo quando a cota estoura.
-
-    Duas defesas contra isso:
+    O download de ~58 GB e a fase mais longa; e onde uma transferencia
+    corrompida custa mais caro. Duas defesas:
       - divida o pacote com Split-Package.ps1, que gera partes de 5 GB e um
         manifest.txt com SHA-256 de cada uma. Aqui cada parte e conferida por
         tamanho e hash; parte ruim e refeita sozinha.
       - sem manifesto, resta conferir o magic number do zstd (28 B5 2F FD),
-        que ao menos detecta HTML no lugar do arquivo.
+        que ao menos detecta pagina de erro no lugar do arquivo.
 
     Com partes a extracao e por streaming (cat partes | zstd -dc | tar -x):
     os 58 GB nunca sao gravados juntos em disco.
@@ -84,9 +67,6 @@
 [CmdletBinding()]
 param(
     [string]$BaseUrl,
-    [string]$FolderUrl,
-    [string]$VolumeFileId,
-    [string]$ImageFileId,
     # Sem padrao de propriedade: o drive e escolhido pelo portao de
     # requisitos, entre os que tem espaco, pelo maior livre.
     [string]$TargetDir,
@@ -148,7 +128,6 @@ if (Test-Path $ConfigFile) {
     if (-not $WlsPassword  -and $cfg.WlsPassword)  { $WlsPassword  = $cfg.WlsPassword }
     if (-not $AppsPassword -and $cfg.AppsPassword) { $AppsPassword = $cfg.AppsPassword }
     if (-not $PSBoundParameters.ContainsKey('BaseUrl')   -and $cfg.BaseUrl)   { $BaseUrl   = $cfg.BaseUrl }
-    if (-not $PSBoundParameters.ContainsKey('FolderUrl') -and $cfg.FolderUrl) { $FolderUrl = $cfg.FolderUrl }
     if (-not $PSBoundParameters.ContainsKey('AppsHost')  -and $cfg.AppsHost)  { $AppsHost  = $cfg.AppsHost }
     if (-not $PSBoundParameters.ContainsKey('TargetDir') -and $cfg.TargetDir) { $TargetDir = $cfg.TargetDir }
 }
@@ -563,57 +542,7 @@ function Wait-VmStep {
     Die "tempo esgotado esperando a fase '$Name' (limite de $TimeoutMin min). Veja $logFile"
 }
 
-# ---------------------------------------------------------------- Google Drive
-
-# Le a listagem de uma pasta publica. Nao ha API sem chave para isso; o caminho
-# (o mesmo que o gdown usa) e extrair a variavel _DRIVE_ivd da pagina. E
-# scraping: quebra quando o Google mudar o HTML. Dai os parametros -*FileId.
-function Get-GDriveFolderFiles {
-    param([Parameter(Mandatory)][string]$Url)
-
-    $id = $null
-    if     ($Url -match 'folders/([a-zA-Z0-9_-]{10,})') { $id = $Matches[1] }
-    elseif ($Url -match '^[a-zA-Z0-9_-]{10,}$')         { $id = $Url }
-    if (-not $id) { Die "nao consegui extrair o ID da pasta de: $Url" }
-
-    Write-Info "lendo a pasta $id"
-    try {
-        $resp = Invoke-WebRequest -Uri "https://drive.google.com/drive/folders/$id" `
-                                  -UseBasicParsing -TimeoutSec 60
-    } catch {
-        Die "falha ao abrir a pasta do Drive: $($_.Exception.Message)"
-    }
-
-    # A atribuicao vem como  window['_DRIVE_ivd'] = '...'  -- procurar o nome e
-    # so entao o "= '...'" evita depender do que ha entre os dois.
-    $idx = $resp.Content.IndexOf('_DRIVE_ivd')
-    $m = $null
-    if ($idx -ge 0) { $m = [regex]::Match($resp.Content.Substring($idx), "=\s*'([^']+)'") }
-    if (-not $m -or -not $m.Success) {
-        Die ("nao achei a listagem na pagina da pasta. Ou a pasta nao esta publica, " +
-             "ou o Google mudou o HTML. Passe -VolumeFileId e -ImageFileId na mao.")
-    }
-
-    # o blob vem todo escapado em \xNN (\x22 = aspas, \x5b = [, \x5d = ])
-    $decoded = [regex]::Replace($m.Groups[1].Value, '\\x([0-9a-fA-F]{2})', {
-        param($mm) [char][Convert]::ToInt32($mm.Groups[1].Value, 16)
-    })
-    $decoded = $decoded -replace '\\/','/' -replace '\\"','"'
-
-    # Estrutura de cada entrada:  "<id>",["<idDoPai>"],"<nome>",...
-    # O pai vem em array ANINHADO, nao como string solta -- detalhe que muda a regex.
-    $files = @()
-    $rx = [regex]'"([a-zA-Z0-9_-]{20,})",\["[a-zA-Z0-9_-]{20,}"\],"([^"]+)"'
-    foreach ($mm in $rx.Matches($decoded)) {
-        $files += [pscustomobject]@{ Id = $mm.Groups[1].Value; Name = $mm.Groups[2].Value }
-    }
-    $files = $files | Sort-Object Name -Unique
-    if (-not $files) { Die 'a pasta foi lida mas nenhum arquivo foi reconhecido' }
-
-    Write-Info 'arquivos encontrados:'
-    $files | ForEach-Object { Write-Info "  - $($_.Name)" }
-    return $files
-}
+# ---------------------------------------------------------------------- pacote
 
 # Baixa um texto pequeno por HTTP (o manifesto num bucket/host qualquer).
 function Get-HttpText {
@@ -621,23 +550,6 @@ function Get-HttpText {
     $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60
     # servidores costumam servir .txt como octet-stream; ai o PS 5.1 devolve byte[]
     if ($r.Content -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($r.Content) }
-    return [string]$r.Content
-}
-
-# Arquivos pequenos (o manifesto) nao passam pelo interstitial de virus.
-function Get-GDriveTextFile {
-    param([Parameter(Mandatory)][string]$Id)
-    $u = "https://drive.usercontent.google.com/download?id=$Id&export=download"
-    try {
-        $r = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 60
-    } catch {
-        Die "falha ao baixar o manifesto: $($_.Exception.Message)"
-    }
-    # O Drive serve o .txt como octet-stream, e ai o PowerShell 5.1 devolve
-    # byte[] em .Content em vez de string. Converter na mao.
-    if ($r.Content -is [byte[]]) {
-        return [Text.Encoding]::UTF8.GetString($r.Content)
-    }
     return [string]$r.Content
 }
 
@@ -676,81 +588,39 @@ function Resolve-Pacote {
         [pscustomobject]@{ Origem = $Origem; Nome = $Nome; Tamanho = $Tamanho; Sha = $Sha }
     }
 
-    if ($BaseUrl) {
-        # ---- HTTP simples (Cloudflare R2, S3, qualquer host com Range) ----
-        # Muito melhor que o Drive: sem cota, sem scraping de HTML, sem
-        # interstitial de virus, e a retomada do curl -C - e byte-exata.
-        $raiz = $BaseUrl.TrimEnd('/')
-        Write-Info "origem HTTP: $raiz"
-
-        $man = @{}
-        try {
-            $man = ConvertFrom-Manifest -Text (Get-HttpText "$raiz/manifest.txt")
-            Write-Ok "manifesto lido: $($man.Count) entradas"
-        } catch {
-            Write-Warn2 'sem manifest.txt acessivel: nao havera conferencia de SHA-256'
-        }
-
-        if ($man.Count -gt 0) {
-            $extra = @($man.Values | Where-Object { $_.Kind -eq 'EXTRA' })
-            $parts = @($man.Values | Where-Object { $_.Kind -eq 'PART'  } | Sort-Object Name)
-            foreach ($e in $extra) { $itens.Add((Novo-Item "$raiz/$($e.Name)" $e.Name $e.Size $e.Sha)) }
-            if ($parts.Count -gt 0) {
-                Write-Info "volume: $($parts.Count) partes"
-                foreach ($p in $parts) { $itens.Add((Novo-Item "$raiz/$($p.Name)" $p.Name $p.Size $p.Sha)) }
-            } else {
-                $f = @($man.Values | Where-Object { $_.Kind -eq 'FILE' })[0]
-                if (-not $f) { Die 'manifesto sem PART nem FILE' }
-                $itens.Add((Novo-Item "$raiz/$($f.Name)" $f.Name $f.Size $f.Sha))
-                Write-Info "volume: $($f.Name) (arquivo unico)"
-            }
-        } else {
-            # sem manifesto: nomes padrao do pacote, conferencia so pelo magic
-            $itens.Add((Novo-Item "$raiz/ebs-image-ol7-cll-ok.tar.zst" 'ebs-image-ol7-cll-ok.tar.zst' 0 '-'))
-            $itens.Add((Novo-Item "$raiz/u01-r12-lad-brasil.tar.zst"   'u01-r12-lad-brasil.tar.zst'   0 '-'))
-        }
+    # Origem unica: HTTP com suporte a Range -- Cloudflare R2, S3, ou qualquer
+    # host equivalente. A retomada do curl -C - e byte-exata.
+    if (-not $BaseUrl) {
+        Die 'informe -BaseUrl: a URL base do bucket com as partes e o manifest.txt'
     }
-    elseif ($VolumeFileId -and $ImageFileId) {
-        $itens.Add((Novo-Item $ImageFileId  'ebs-image.tar.zst' 0 '-'))
-        $itens.Add((Novo-Item $VolumeFileId 'u01.tar.zst'       0 '-'))
-        Write-Warn2 'IDs passados na mao: sem manifesto, a conferencia fica so no magic number'
+    $raiz = $BaseUrl.TrimEnd('/')
+    Write-Info "origem HTTP: $raiz"
+
+    $man = @{}
+    try {
+        $man = ConvertFrom-Manifest -Text (Get-HttpText "$raiz/manifest.txt")
+        Write-Ok "manifesto lido: $($man.Count) entradas"
+    } catch {
+        Write-Warn2 'sem manifest.txt acessivel: nao havera conferencia de SHA-256'
     }
-    else {
-        if (-not $FolderUrl) { Die 'informe -BaseUrl, -FolderUrl, ou -VolumeFileId e -ImageFileId' }
-        $files = Get-GDriveFolderFiles -Url $FolderUrl
 
-        $man = @{}
-        $mf = $files | Where-Object { $_.Name -eq 'manifest.txt' } | Select-Object -First 1
-        if ($mf) {
-            $man = ConvertFrom-Manifest -Text (Get-GDriveTextFile -Id $mf.Id)
-            Write-Ok "manifesto lido: $($man.Count) entradas"
-        } else {
-            Write-Warn2 'sem manifest.txt na pasta: nao havera conferencia de SHA-256'
-        }
-
-        $img = $files | Where-Object { $_.Name -like '*image*.tar.zst' } | Select-Object -First 1
-        if (-not $img) { Die 'nao achei o *image*.tar.zst na pasta' }
-        $sz = 0; $sh = '-'
-        if ($man[$img.Name]) { $sz = $man[$img.Name].Size; $sh = $man[$img.Name].Sha }
-        $itens.Add((Novo-Item $img.Id $img.Name $sz $sh))
-        Write-Info "imagem: $($img.Name)"
-
-        $parts = @($files | Where-Object { $_.Name -match '\.part\d{3}$' } | Sort-Object Name)
+    if ($man.Count -gt 0) {
+        $extra = @($man.Values | Where-Object { $_.Kind -eq 'EXTRA' })
+        $parts = @($man.Values | Where-Object { $_.Kind -eq 'PART'  } | Sort-Object Name)
+        foreach ($e in $extra) { $itens.Add((Novo-Item "$raiz/$($e.Name)" $e.Name $e.Size $e.Sha)) }
         if ($parts.Count -gt 0) {
             Write-Info "volume: $($parts.Count) partes"
-            foreach ($p in $parts) {
-                $sz = 0; $sh = '-'
-                if ($man[$p.Name]) { $sz = $man[$p.Name].Size; $sh = $man[$p.Name].Sha }
-                $itens.Add((Novo-Item $p.Id $p.Name $sz $sh))
-            }
+            foreach ($p in $parts) { $itens.Add((Novo-Item "$raiz/$($p.Name)" $p.Name $p.Size $p.Sha)) }
         } else {
-            $vol = $files | Where-Object { $_.Name -like '*u01*.tar.zst' } | Select-Object -First 1
-            if (-not $vol) { Die 'nao achei nem partes (*.partNNN) nem *u01*.tar.zst na pasta' }
-            $sz = 0; $sh = '-'
-            if ($man[$vol.Name]) { $sz = $man[$vol.Name].Size; $sh = $man[$vol.Name].Sha }
-            $itens.Add((Novo-Item $vol.Id $vol.Name $sz $sh))
-            Write-Info "volume: $($vol.Name) (arquivo unico)"
+            $f = @($man.Values | Where-Object { $_.Kind -eq 'FILE' })[0]
+            if (-not $f) { Die 'manifesto sem PART nem FILE' }
+            $itens.Add((Novo-Item "$raiz/$($f.Name)" $f.Name $f.Size $f.Sha))
+            Write-Info "volume: $($f.Name) (arquivo unico)"
         }
+    } else {
+        # sem manifesto: nomes padrao do pacote, conferencia so pelo magic
+        $itens.Add((Novo-Item "$raiz/ebs-image-ol7-cll-ok.tar.zst" 'ebs-image-ol7-cll-ok.tar.zst' 0 '-'))
+        $itens.Add((Novo-Item "$raiz/u01-r12-lad-brasil.tar.zst"   'u01-r12-lad-brasil.tar.zst'   0 '-'))
     }
     return $itens
 }
@@ -1498,8 +1368,7 @@ echo "shmmax = $(sysctl -n kernel.shmmax), shmall = $(sysctl -n kernel.shmall)"
 if (Should-Run 'Download') {
     Write-Phase 'Download'
 
-    # lista "id nome bytes sha256" do que baixar, uma linha por arquivo
-    # (com -BaseUrl o "id" e a URL completa; com Drive, o file id).
+    # lista "url nome bytes sha256" do que baixar, uma linha por arquivo.
     # O QUE baixar ja foi resolvido na montagem do plano -- aqui so vira texto
     # para o here-doc do bash.
     $baixar = New-Object Collections.Generic.List[string]
@@ -1526,54 +1395,10 @@ pct_parcial() {
   echo "@@PCT $(( ATUAL * 100 / TOTAL ))"
 }
 
-# O Drive intercala uma pagina de aviso de virus em arquivo grande. O fluxo e:
-# pegar a pagina, extrair os campos do formulario (confirm/uuid) e repetir.
-gdrive_get() {
-  local ID="$1" OUT="$2"
-  local CK TMP
-  CK=$(mktemp); TMP=$(mktemp)
-  curl -sL -c "$CK" -o "$TMP" "https://drive.usercontent.google.com/download?id=${ID}&export=download"
-  if head -c 512 "$TMP" | grep -qi '<html'; then
-    local UUID CONF
-    UUID=$(grep -o 'name="uuid" value="[^"]*"' "$TMP" | sed 's/.*value="//;s/"//')
-    CONF=$(grep -o 'name="confirm" value="[^"]*"' "$TMP" | sed 's/.*value="//;s/"//')
-    [ -z "$CONF" ] && CONF=t
-    rm -f "$TMP"
-    # -sS: sem o medidor de progresso o log nao incha (o medidor gera linhas
-    # imensas cheias de \r que depois inundam o console de quem acompanha),
-    # mas erros continuam visiveis. O progresso vira UMA linha por minuto,
-    # impressa pelo watcher abaixo.
-    curl -sS -L -C - -b "$CK" --retry 5 --retry-delay 10 --retry-all-errors \
-         -o "$OUT" \
-         "https://drive.usercontent.google.com/download?id=${ID}&export=download&confirm=${CONF}&uuid=${UUID}" &
-    local CPID=$! VOLTA=0
-    # Fatias de 10 s, mas UMA linha por minuto: o @@PCT alimenta a barra em
-    # tempo real sem inchar o log, e um arquivo que baixa rapido nao fica
-    # esperando o resto do minuto para o laco perceber que acabou.
-    # 10 s slices, one printed line per minute: the bar stays live without
-    # bloating the log, and a fast file does not idle out the rest of a minute.
-    while kill -0 $CPID 2>/dev/null; do
-      sleep 10
-      kill -0 $CPID 2>/dev/null || break
-      VOLTA=$((VOLTA + 1))
-      # progresso dentro do passo. $SIZE e local da funcao chamadora: em bash
-      # o escopo e dinamico, entao ele esta visivel aqui.
-      pct_parcial "$OUT" "${SIZE:-0}"
-      if [ $((VOLTA % 6)) -eq 0 ]; then
-        echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $(basename "$OUT")"
-      fi
-    done
-    wait $CPID
-  else
-    mv "$TMP" "$OUT"
-  fi
-  rm -f "$CK" "$TMP" 2>/dev/null
-}
-
-# Sem manifesto so da para olhar o magic do zstd (28 B5 2F FD). Se o Drive
-# devolveu HTML -- cota do arquivo publico estourada, ou compartilhamento que
-# nao esta realmente publico -- o magic nao bate e paramos aqui, em vez de
-# entregar uma pagina de erro para o tar e falhar meia hora depois.
+# Sem manifesto so da para olhar o magic do zstd (28 B5 2F FD). Se o servidor
+# devolveu HTML -- bucket sem leitura publica, caminho errado, pagina de erro
+# do CDN -- o magic nao bate e paramos aqui, em vez de entregar isso para o tar
+# e falhar meia hora depois.
 magic_ok() {
   local M
   M=$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')
@@ -1605,50 +1430,30 @@ baixa() {
     fi
 
     echo "    $NAME: baixando (tentativa $tent)"
-    case "$ID" in
-      http://*|https://*)
-        # HTTP direto: -C - retoma byte-exato de onde parou, sem cota nem
-        # interstitial. E o caminho bom; o do Drive abaixo e o contorno.
-        curl -sS -L -C - --retry 5 --retry-delay 10 --retry-all-errors \
-             -o "$OUT" "$ID" &
-        CPID=$!; VOLTA=0
-        while kill -0 $CPID 2>/dev/null; do
-          sleep 10
-          kill -0 $CPID 2>/dev/null || break
-          VOLTA=$((VOLTA + 1))
-          pct_parcial "$OUT" "$SIZE"
-          if [ $((VOLTA % 6)) -eq 0 ]; then
-            echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $NAME"
-          fi
-        done
-        wait $CPID
-        ;;
-      *) gdrive_get "$ID" "$OUT" ;;
-    esac
+    # -C - retoma byte-exato de onde parou. O -sS tira o medidor de progresso
+    # do curl, que geraria linhas imensas cheias de \r e inundaria o log, sem
+    # esconder erros; o andamento sai do laco abaixo, uma linha por minuto.
+    curl -sS -L -C - --retry 5 --retry-delay 10 --retry-all-errors \
+         -o "$OUT" "$ID" &
+    CPID=$!; VOLTA=0
+    while kill -0 $CPID 2>/dev/null; do
+      sleep 10
+      kill -0 $CPID 2>/dev/null || break
+      VOLTA=$((VOLTA + 1))
+      pct_parcial "$OUT" "$SIZE"
+      if [ $((VOLTA % 6)) -eq 0 ]; then
+        echo "      ... $(du -h "$OUT" 2>/dev/null | cut -f1 || echo 0) de $NAME"
+      fi
+    done
+    wait $CPID
 
     if [ "$SIZE" != "0" ]; then
       atual=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
       if [ "$atual" != "$SIZE" ]; then
         echo "    $NAME: tamanho $atual, esperado $SIZE"
-        # A cota do Drive nao adianta insistir em segundos: e limite por
-        # janela de tempo. Melhor parar na hora com a instrucao certa do que
-        # gastar a segunda tentativa e terminar com uma pagina HTML na tela.
-        if grep -qi 'Quota exceeded' "$OUT" 2>/dev/null; then
-          echo ""
-          echo "    >>> COTA DO GOOGLE DRIVE ESTOURADA <<<"
-          echo "    O Drive limita quanto um arquivo publico pode ser baixado por"
-          echo "    janela de tempo, e responde com uma pagina HTML em vez do arquivo."
-          echo "    Nao adianta repetir agora: espere algumas horas (ate 24h) e rode"
-          echo "    de novo com -From Download. As partes ja conferidas sao mantidas;"
-          echo "    so a que faltou sera baixada."
-          echo ""
-          echo "    >>> GOOGLE DRIVE QUOTA EXCEEDED <<<"
-          echo "    Wait a few hours (up to 24h) and re-run with -From Download."
-          echo "    Verified parts are kept; only the missing one is fetched."
-          echo ""
-          rm -f "$OUT"
-          return 1
-        fi
+        # Tamanho errado quase sempre e o servidor devolvendo pagina de erro no
+        # lugar do arquivo -- bucket sem leitura publica, caminho errado, erro
+        # do CDN. As primeiras linhas dizem qual, e economizam a investigacao.
         head -c 200 "$OUT" 2>/dev/null; echo
         rm -f "$OUT"; continue
       fi
@@ -1690,12 +1495,10 @@ df -h /var | tail -1
 
     $dlLog = Get-Content (Join-Path $script:LogsDir 'download.log') -Raw
     if ($dlLog -notmatch 'download OK') {
-        if ($dlLog -match 'COTA DO GOOGLE DRIVE ESTOURADA|Quota exceeded') {
-            Die ('cota do Google Drive estourada. Espere algumas horas e rode de novo com ' +
-                 '-From Download -- as partes ja conferidas sao mantidas. / Google Drive ' +
-                 'quota exceeded; wait a few hours and re-run with -From Download.')
-        }
-        Die "o download falhou; veja $($script:LogsDir)\download.log"
+        # Reexecutar e barato: cada parte ja conferida por tamanho e SHA-256 e
+        # pulada em segundos, e so a que faltou volta a ser baixada.
+        Die ("o download falhou; veja $($script:LogsDir)\download.log. " +
+             'Rode de novo com -From Download -- as partes ja conferidas sao mantidas.')
     }
     Write-Ok 'pacote baixado e conferido'
 }

@@ -92,7 +92,7 @@ Copy-Item config.example.psd1 config.psd1   # then fill it in
 
 | Key | Meaning |
 |---|---|
-| `BaseUrl` | public URL of the object-storage bucket holding the package |
+| `BaseUrl` | **required** — public URL of the bucket holding the parts and `manifest.txt` (Cloudflare R2, S3, any host that honours Range) |
 | `WlsPassword` | the password that **already exists** in the image domain (factory: `welcome1`) |
 | `AppsPassword` | APPS schema password (defaults to `apps`) |
 | `AppsHost` | hostname baked into the EBS context (defaults to `apps.example.com`) |

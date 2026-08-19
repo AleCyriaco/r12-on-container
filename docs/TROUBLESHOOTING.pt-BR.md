@@ -350,12 +350,13 @@ wsl --manage podman-ebs --move D:\caminho
 
 ---
 
-## O Google Drive devolve HTML em vez do arquivo
+## O download devolve HTML em vez do arquivo
 
 O download termina suspeitosamente rápido e o arquivo começa com `<html`.
 
-**Causa.** Cota estourada no arquivo público, ou a pasta não está realmente
-compartilhada. O Google serve uma página de erro com HTTP 200.
+**Causa.** O bucket respondeu com uma página de erro carregando HTTP 200:
+leitura pública desabilitada, caminho errado sob o `-BaseUrl`, ou página de
+erro do CDN.
 
 **Detecção.** Um `.tar.zst` começa com os bytes mágicos `28 b5 2f fd`:
 
@@ -365,38 +366,12 @@ head -c 4 arquivo.tar.zst | od -An -tx1
 
 O deploy confere isso, e confere o SHA-256 contra o `manifest.txt` quando ele
 existe. Sem essa checagem, a falha aparece meia hora depois como um erro
-incompreensível do `tar`.
+incompreensível do `tar`. Quando o tamanho não bate, ele ainda imprime os 200
+primeiros bytes do que chegou, que costumam nomear o problema real.
 
-**Correção.** Espere a cota resetar, ou divida em mais partes — a cota é
-contada por arquivo.
-
----
-
-## A listagem da pasta não encontra nada
-
-```
-nao achei a listagem na pagina da pasta
-```
-
-**Causa.** Não existe API sem chave para listar pasta pública do Drive. Isto
-extrai o blob `_DRIVE_ivd` do HTML da página, a mesma abordagem do `gdown`, e o
-Google muda essa marcação sem aviso.
-
-Dois detalhes fáceis de errar ao consertar:
-
-- a atribuição é `window['_DRIVE_ivd'] = '...'` — o `']` fica entre o nome e o
-  `=`
-- depois de decodificar os escapes `\xNN`, cada entrada é
-  `"<id>",["<idDoPai>"],"<nome>"` — o pai vem em **array aninhado**, não como
-  string solta
-
-**Correção.** Contorne com IDs explícitos:
-
-```powershell
-.\Deploy-R12.ps1 -VolumeFileId '1abc...' -ImageFileId '1xyz...'
-```
-
-Nesse caminho não há manifesto, então a verificação cai para o magic number.
+**Correção.** Confirme que os objetos estão publicamente legíveis e que o
+`<BaseUrl>/manifest.txt` abre no navegador, e rode de novo com
+`-From Download` — as partes já conferidas são puladas em segundos.
 
 ---
 
