@@ -10,7 +10,7 @@
       Feito para ser executado direto da web, sem clone previo:
 
         & ([scriptblock]::Create((irm https://raw.githubusercontent.com/OWNER/REPO/main/bootstrap.ps1))) `
-            -FolderUrl 'https://drive.google.com/drive/folders/SEU_ID' -WlsPassword 'SUA_SENHA'
+            -BaseUrl 'https://pub-SEUHASH.r2.dev' -WlsPassword 'SUA_SENHA'
 
       Ele nao carrega credencial nenhuma. A senha do WebLogic vem por parametro
       ou de um config.psd1 que voce cria depois do clone.
@@ -19,19 +19,15 @@
       Meant to run straight from the web, with no prior clone:
 
         & ([scriptblock]::Create((irm https://raw.githubusercontent.com/OWNER/REPO/main/bootstrap.ps1))) `
-            -FolderUrl 'https://drive.google.com/drive/folders/YOUR_ID' -WlsPassword 'YOUR_PASSWORD'
+            -BaseUrl 'https://pub-YOURHASH.r2.dev' -WlsPassword 'YOUR_PASSWORD'
 
       No credentials are embedded. The WebLogic password is passed as a
       parameter or read from a config.psd1 you create after cloning.
 
 .PARAMETER BaseUrl
-    RECOMENDADO. URL base de um bucket/host HTTP com as partes e o
+    OBRIGATORIO. URL base de um bucket/host HTTP com as partes e o
     manifest.txt (Cloudflare R2, S3, qualquer servidor com Range).
-    RECOMMENDED. Base URL of an HTTP bucket/host with the parts and manifest.
-
-.PARAMETER FolderUrl
-    Alternativa: pasta publica do Drive. Sujeita a cota de download.
-    Alternative: public Drive folder. Subject to download quota.
+    REQUIRED. Base URL of an HTTP bucket/host with the parts and manifest.
 
 .PARAMETER WlsPassword
     Senha do WebLogic. Sem ela o AdminServer nao sobe.
@@ -50,7 +46,6 @@
 [CmdletBinding()]
 param(
     [string]$BaseUrl,
-    [string]$FolderUrl,
     # Padrao do pacote de referencia; sobrescreva se a sua instancia usa outra.
     [string]$WlsPassword = 'welcome1',
     [string]$AppsPassword,
@@ -212,7 +207,6 @@ $argumentos = @{
 # Deploy-R12.ps1 pensar que houve escolha explicita e pular a selecao de disco.
 if ($TargetDir)    { $argumentos.TargetDir    = $TargetDir }
 if ($BaseUrl)      { $argumentos.BaseUrl      = $BaseUrl }
-if ($FolderUrl)    { $argumentos.FolderUrl    = $FolderUrl }
 if ($WlsPassword)  { $argumentos.WlsPassword  = $WlsPassword }
 if ($AppsPassword) { $argumentos.AppsPassword = $AppsPassword }
 if ($SgaGb -gt 0)  { $argumentos.SgaGb        = $SgaGb }

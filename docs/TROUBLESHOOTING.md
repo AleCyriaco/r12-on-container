@@ -349,12 +349,12 @@ wsl --manage podman-ebs --move D:\path
 
 ---
 
-## Google Drive returns HTML instead of the file
+## The download returns HTML instead of the file
 
 The download finishes suspiciously fast and the file starts with `<html`.
 
-**Cause.** Quota exceeded on the public file, or the folder is not actually
-shared publicly. Google serves an error page with HTTP 200.
+**Cause.** The bucket answered with an error page carrying HTTP 200: public
+read not enabled, a wrong path under `-BaseUrl`, or a CDN error page.
 
 **Detection.** A `.tar.zst` starts with the magic bytes `28 b5 2f fd`:
 
@@ -364,38 +364,12 @@ head -c 4 file.tar.zst | od -An -tx1
 
 The deployment checks this, and checks SHA-256 against `manifest.txt` when
 present. Without that check the failure surfaces half an hour later as an
-incomprehensible `tar` error.
+incomprehensible `tar` error. On a size mismatch it also prints the first 200
+bytes of what actually arrived, which usually names the real problem.
 
-**Fix.** Wait for the quota to reset, or split into more parts — quota is
-tracked per file.
-
----
-
-## Folder listing finds nothing
-
-```
-nao achei a listagem na pagina da pasta
-```
-
-**Cause.** There is no key-free API to list a public Drive folder. This parses
-the `_DRIVE_ivd` blob from the page HTML, the same approach `gdown` uses, and
-Google changes that markup without notice.
-
-Two details that are easy to get wrong when repairing it:
-
-- the assignment is `window['_DRIVE_ivd'] = '...'` — the `']` sits between the
-  name and the `=`
-- once the `\xNN` escapes are decoded, each entry reads
-  `"<id>",["<parentId>"],"<name>"` — the parent is a **nested array**, not a
-  bare string
-
-**Fix.** Bypass it with explicit IDs:
-
-```powershell
-.\Deploy-R12.ps1 -VolumeFileId '1abc...' -ImageFileId '1xyz...'
-```
-
-Note that this path has no manifest, so verification drops to the magic number.
+**Fix.** Confirm the objects are publicly readable and that
+`<BaseUrl>/manifest.txt` opens in a browser, then re-run with
+`-From Download` — parts already verified are skipped in seconds.
 
 ---
 

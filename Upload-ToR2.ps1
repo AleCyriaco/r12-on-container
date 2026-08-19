@@ -38,9 +38,9 @@
 
 .NOTES
     Custo aproximado para 58 GB no R2: ~US$ 0,72/mes de armazenamento
-    (10 GB sao gratuitos) e ZERO de egress -- e por isso que o R2 serve aqui
-    e o Google Drive nao: la a cota de download por arquivo publico
-    interrompe a transferencia no meio.
+    (10 GB sao gratuitos) e ZERO de egress. O Backblaze B2 e equivalente;
+    qualquer host que aceite Range serve, porque o Deploy-R12.ps1 retoma o
+    download com curl -C -.
 #>
 
 [CmdletBinding()]
