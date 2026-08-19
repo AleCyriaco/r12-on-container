@@ -110,10 +110,32 @@ done
 echo "[*] pilha de aplicacao (varios minutos)"
 # O adstrtal.sh pede a senha do WebLogic no stdin: sem "podman exec -i" ela
 # chega vazia, o AdminServer falha e todos os managed servers sao pulados.
-printf '%s\n' "$WLSPWD" | podman exec -i -u oracle "$CTR" bash -lc "
+APPSOUT=$(printf '%s\n' "$WLSPWD" | podman exec -i -u oracle "$CTR" bash -lc "
   source /u01/install/APPS/EBSapps.env run
-  \$ADMIN_SCRIPTS_HOME/adstrtal.sh apps/$APPSPWD" 2>&1 |
-  grep -E "exiting with status|Exiting with status|ERROR"
+  \$ADMIN_SCRIPTS_HOME/adstrtal.sh apps/$APPSPWD" 2>&1)
+echo "$APPSOUT" | grep -E "exiting with status|Exiting with status|ERROR"
+
+# Senha errada e falha generica saem as duas como "AdminServer is down", entao
+# separe as duas aqui: "Invalid credentials passed" vem do nmConnect e significa
+# senha do WebLogic recusada. O NodeManager em si subiu -- o log dele mostra
+# "Plain socket listener started on port 5556" -- e e justamente isso que faz
+# perder tempo cacando o NodeManager. A senha de fabrica do pacote e 'welcome1'.
+# Wrong password and generic failure both surface as "AdminServer is down";
+# "Invalid credentials passed" comes from nmConnect and means the WebLogic
+# password was rejected, even though the NodeManager itself started fine.
+APPSFAIL=0
+if echo "$APPSOUT" | grep -q "Invalid credentials passed"; then
+  APPSFAIL=1
+  echo ""
+  echo "ERRO: o NodeManager recusou a senha do WebLogic."
+  echo "      Confira WLS_PASSWORD: a senha de fabrica do pacote e 'welcome1'."
+  echo "ERROR: NodeManager rejected the WebLogic password (factory: 'welcome1')."
+elif echo "$APPSOUT" | grep -qE "ServiceControl is exiting with status [1-9]"; then
+  APPSFAIL=1
+  echo ""
+  echo "ERRO: a pilha de aplicacao nao subiu por completo."
+  echo "ERROR: the application tier did not come up completely."
+fi
 
 # O ICM as vezes perde a corrida com o lock da sessao anterior e morre com
 # "FND_DCP.Request_Session_Lock ... result code of 1 / establish_icm failed".
@@ -138,7 +160,25 @@ fi
 
 echo
 echo "[*] verificacao"
-podman exec "$CTR" bash -lc '
+VER=$(podman exec "$CTR" bash -lc '
   printf "  AppsLogin  : "; curl -s -o /dev/null -w "%{http_code}\n" http://apps.example.com:8000/OA_HTML/AppsLogin
-  printf "  frmservlet : "; curl -s -o /dev/null -w "%{http_code}\n" "http://apps.example.com:8000/forms/frmservlet?config=EBSDB"'
+  printf "  frmservlet : "; curl -s -o /dev/null -w "%{http_code}\n" "http://apps.example.com:8000/forms/frmservlet?config=EBSDB"' 2>&1)
+echo "$VER"
 echo "  esperado / expected: 302 e 200"
+
+# Este script terminava SEMPRE em 0: sem "set -e", o adstrtal saindo 1 nao
+# interrompia nada e o status final era o do ultimo echo. O painel marcava 100%
+# e o .rc ficava 0 com o WebLogic fora do ar -- o bring-up mentia. O status
+# agora reflete o que de fato subiu.
+# This script always exited 0: without "set -e" a failing adstrtal changed
+# nothing and the final status came from the last echo, so the panel reported
+# 100% with WebLogic down. The exit status now reflects what actually started.
+if [ "$APPSFAIL" = "1" ] || ! echo "$VER" | grep -qE "AppsLogin *: (200|302)"; then
+  echo ""
+  echo "ERRO: bring-up incompleto -- o AppsLogin nao respondeu 200/302."
+  echo "ERROR: incomplete bring-up -- AppsLogin did not answer 200/302."
+  exit 1
+fi
+
+echo "[*] tudo no ar / all up"
+exit 0

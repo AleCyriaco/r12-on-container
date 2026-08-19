@@ -1923,16 +1923,74 @@ podman exec "$CTR" bash -lc 'getent hosts __APPSHOST__'
     # para o hostname e o EBS o grava no contexto e nos perfis.
     if (-not $SkipHostsEntry) {
         $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-        $entry     = "127.0.0.1    $AppsHost"
-        $atual     = Get-Content $hostsFile -ErrorAction SilentlyContinue
-        if ($atual -match [regex]::Escape($AppsHost)) {
-            Write-Ok "$AppsHost ja resolve no hosts do Windows"
+        $entry     = "127.0.0.1`t$AppsHost"
+        $linhas    = @(Get-Content $hostsFile -ErrorAction SilentlyContinue)
+
+        # Conferir para onde o nome aponta, nao apenas se ele aparece. Uma
+        # entrada antiga apontando para o IP de LAN da maquina passava por
+        # "ja resolve", sobrevivia ao deploy inteiro e deixava de valer no lease
+        # seguinte do DHCP. O sintoma nao ajuda: AppsLogin em timeout com o EBS
+        # inteiro no ar e o 127.0.0.1:8000 respondendo 302. Como este passo roda
+        # elevado, a linha errada e corrigida aqui e nao deixada como recado.
+        #
+        # A linha inteira nunca e descartada: um mesmo IP costuma listar varios
+        # nomes, e jogar a linha fora levaria os outros junto. Sai so o nome em
+        # questao; a linha some apenas se ficar sem nome nenhum.
+        $novas     = New-Object System.Collections.Generic.List[string]
+        $conflitos = New-Object System.Collections.Generic.List[string]
+        $jaCorreta = $false
+
+        foreach ($l in $linhas) {
+            if ($l -match '^\s*#' -or $l -notmatch '\S') { $novas.Add($l); continue }
+
+            $corpo = $l; $comentario = ''
+            $i = $l.IndexOf('#')
+            if ($i -ge 0) { $corpo = $l.Substring(0, $i); $comentario = ' ' + $l.Substring($i) }
+
+            $campos = @($corpo.Trim() -split '\s+' | Where-Object { $_ -ne '' })
+            if ($campos.Count -lt 2) { $novas.Add($l); continue }
+
+            $ip    = $campos[0]
+            $nomes = @($campos | Select-Object -Skip 1)
+            if (-not ($nomes | Where-Object { $_ -eq $AppsHost })) { $novas.Add($l); continue }
+
+            # Ja canonica e a primeira: mantem. Qualquer outra citacao do nome e
+            # conflito, inclusive uma segunda 127.0.0.1 -- nome duplicado
+            # resolve para enderecos diferentes e falha de forma intermitente.
+            if (-not $jaCorreta -and $ip -eq '127.0.0.1' -and $nomes.Count -eq 1) {
+                $jaCorreta = $true
+                $novas.Add($l)
+                continue
+            }
+
+            $conflitos.Add($corpo.Trim())
+            $resto = @($nomes | Where-Object { $_ -ne $AppsHost })
+            if ($resto.Count -gt 0) {
+                $novas.Add(("{0}`t{1}{2}" -f $ip, ($resto -join ' '), $comentario))
+            }
+        }
+
+        if ($jaCorreta -and $conflitos.Count -eq 0) {
+            Write-Ok "$AppsHost ja resolve para 127.0.0.1 no hosts do Windows"
         } elseif (Test-Admin) {
-            Add-Content -Path $hostsFile -Value "`n$entry"
-            Write-Ok "adicionado ao hosts: $entry"
+            if (-not $jaCorreta) { $novas.Add($entry) }
+            $bak = "$hostsFile.r12-bak"
+            Copy-Item $hostsFile $bak -Force -ErrorAction SilentlyContinue
+            # Sem -Encoding: o padrao do Windows PowerShell e ANSI sem BOM, que
+            # e o que o resolvedor espera. UTF-8 com BOM quebra a primeira linha.
+            Set-Content -Path $hostsFile -Value $novas
+            if ($conflitos.Count -gt 0) {
+                Write-Ok ("hosts corrigido: {0} -> 127.0.0.1 {1}" -f ($conflitos -join ' | '), $AppsHost)
+                Write-Host "      copia do original em $bak" -ForegroundColor DarkGray
+            } else {
+                Write-Ok "adicionado ao hosts: 127.0.0.1 $AppsHost"
+            }
         } else {
-            Write-Warn2 'sem privilegio para editar o hosts do Windows. Rode como Administrador:'
-            Write-Host "      Add-Content '$hostsFile' `"`n$entry`"" -ForegroundColor Yellow
+            Write-Warn2 'sem privilegio para editar o hosts do Windows. Rode como Administrador, ou ajuste a mao:'
+            Write-Host "      $hostsFile precisa de UMA linha: 127.0.0.1    $AppsHost" -ForegroundColor Yellow
+            if ($conflitos.Count -gt 0) {
+                Write-Host "      removendo antes: $($conflitos -join ' | ')" -ForegroundColor Yellow
+            }
         }
     }
     Complete-Passo 'ct:hosts'
@@ -2085,10 +2143,26 @@ echo "[*] pilha de aplicacao"
 # vazia, o AdminServer falha com status 1 e todos os managed servers sao pulados
 # com "Skipping startup ... AdminServer is down" -- mensagem que despista, porque
 # o erro real (senha) fica escondido atras da cascata sobre o AdminServer.
-printf '%s\n' '__WLSPWD__' | podman exec -i -u oracle "$CTR" bash -lc '
+APPSOUT=$(printf '%s\n' '__WLSPWD__' | podman exec -i -u oracle "$CTR" bash -lc '
   source /u01/install/APPS/EBSapps.env run
-  $ADMIN_SCRIPTS_HOME/adstrtal.sh apps/__APPSPWD__' 2>&1 |
-  grep -E "exiting with status|Exiting with status|ERROR"
+  $ADMIN_SCRIPTS_HOME/adstrtal.sh apps/__APPSPWD__' 2>&1)
+echo "$APPSOUT" | grep -E "exiting with status|Exiting with status|ERROR"
+
+# Senha errada e falha generica saem as duas como "AdminServer is down", entao
+# separe as duas aqui. "Invalid credentials passed" vem do nmConnect: a senha
+# do WebLogic foi recusada. O NodeManager em si subiu -- o log dele mostra
+# "Plain socket listener started on port 5556" -- e e justamente isso que faz
+# perder tempo cacando o NodeManager. -WlsPassword precisa ser a senha que JA
+# existe no dominio da imagem: o deploy usa essa senha, nao a define.
+APPSFAIL=0
+if echo "$APPSOUT" | grep -q "Invalid credentials passed"; then
+  APPSFAIL=1
+  echo "ERRO: o NodeManager recusou a senha do WebLogic (-WlsPassword)."
+  echo "      A senha de fabrica do pacote de referencia e 'welcome1'."
+elif echo "$APPSOUT" | grep -qE "ServiceControl is exiting with status [1-9]"; then
+  APPSFAIL=1
+  echo "ERRO: a pilha de aplicacao nao subiu por completo."
+fi
 
 # O ICM as vezes perde a corrida com o lock da sessao anterior e morre com
 # "FND_DCP.Request_Session_Lock ... result code of 1 / establish_icm failed".
@@ -2108,6 +2182,14 @@ if ! echo "$CM" | grep -qi "is Active"; then
     source /u01/install/APPS/EBSapps.env run >/dev/null 2>&1
     $ADMIN_SCRIPTS_HOME/adcmctl.sh start apps/apps' 2>&1 | grep -iE "starting|exiting with status"
   sleep 60
+fi
+
+# Este passo terminava SEMPRE em 0: o ultimo comando era um echo, entao o
+# Wait-VmStep recebia rc=0 e o deploy declarava sucesso com o WebLogic fora do
+# ar -- painel em 100%, services.log.rc em 0 e nenhum AdminServer no ar.
+if [ "$APPSFAIL" = "1" ]; then
+  echo "ERRO: bring-up incompleto -- o apps tier nao subiu."
+  exit 1
 fi
 
 echo "[*] services OK"
