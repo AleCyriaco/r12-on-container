@@ -1,0 +1,25 @@
+# Copie como painel.conf ao lado do painel-ebs.exe e ajuste. Toda chave e
+# opcional: sem o arquivo, o painel usa exatamente estes valores como padrao.
+#
+# ATENCAO: o painel.conf real guarda senhas em texto puro. Ele esta no
+# .gitignore e nao deve sair da maquina.
+machine             = ebs
+container           = ebs
+target_dir          = C:\R12OnContainer
+apps_host           = apps.example.com
+apps_port           = 8000
+db_port             = 1521
+service             = EBSDB
+cdb                 = EBSCDB
+u01_volume          = /var/ebs-u01
+
+# A senha de fabrica do pacote de referencia e welcome1. Ela nao e escolhida
+# por voce: e a que ja existe no dominio WebLogic da imagem, e o deploy apenas
+# autentica com ela.
+wls_password        = welcome1
+apps_password       = apps
+sysadmin_password   = (veja o README do seu pacote)
+ebs_system_password = (veja o README do seu pacote)
+system_password     = (veja o README do seu pacote)
+sys_password        = (veja o README do seu pacote)
+cll_password        = (veja o README do seu pacote)

@@ -33,6 +33,17 @@ scripts/sysctl.sh
 scripts/sga.sh
 scripts/vm-info.sh
 
+# Painel nativo: o build do cargo, o painel.conf real (senhas em texto puro,
+# so o .example e versionado), o relato do conserto do hosts e o binario
+# copiado para a pasta da instancia.
+# Native panel: cargo build output, the real painel.conf (plaintext passwords;
+# only the .example is versioned), and the copied binary.
+painel/target/
+painel.conf
+painel-diag.txt
+painel-hosts.txt
+painel-ebs.exe
+
 # Windows / editores
 Thumbs.db
 desktop.ini
